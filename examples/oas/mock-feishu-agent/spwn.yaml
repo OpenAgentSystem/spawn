@@ -1,0 +1,5 @@
+name: mock-feishu-agent
+worlds:
+  feishu-sandbox:
+    agents:
+      - mock-feishu-router

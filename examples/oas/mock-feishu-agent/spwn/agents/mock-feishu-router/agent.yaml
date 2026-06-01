@@ -1,0 +1,5 @@
+name: mock-feishu-router
+role: worker
+runtime:
+  backend: spwn:codex
+deps: []
