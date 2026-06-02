@@ -10,6 +10,22 @@ var Adapter = runtimes.Adapter{
 	Tool:            Tool,
 	Render:          Renderer,
 	Spawn:           Spawner,
+	Spec: runtimes.AdapterSpec{
+		SchemaVersion:  runtimes.AdapterSpecV1,
+		AgentFamily:    "claude-code",
+		AdapterVersion: "1.0.0",
+		RuntimeSurface: runtimes.RuntimeSurfaceCLI,
+		LegalEvidence: runtimes.LegalEvidence{
+			ToSURL:                  "https://code.claude.com/docs/en/legal-and-compliance",
+			PrivacyURL:              "https://docs.claude.com/en/docs/claude-code/data-usage",
+			ReviewState:             runtimes.ToSReviewConditional,
+			IntendedUses:            []runtimes.IntendedUse{runtimes.IntendedUseInternalRnD, runtimes.IntendedUseControlledPoC},
+			CustomerDataAllowed:     false,
+			SourceCodeAllowed:       true,
+			ProductionLogAllowed:    false,
+			TrainingOptOutAvailable: true,
+		},
+	},
 }
 
 func init() { runtimes.Register(Adapter) }

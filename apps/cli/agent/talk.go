@@ -12,10 +12,10 @@ import (
 
 	"github.com/spf13/cobra"
 	"spwn.sh/apps/cli/ui"
-	"spwn.sh/packages/auth"
 	"spwn.sh/packages/agent"
-	"spwn.sh/packages/platform"
 	"spwn.sh/packages/architect"
+	"spwn.sh/packages/auth"
+	"spwn.sh/packages/platform"
 	"spwn.sh/packages/runtimes"
 	"spwn.sh/packages/world"
 )
@@ -92,7 +92,9 @@ If no message is provided, opens an interactive session inside the container.`,
 		if w != nil && w.Runtime != "" {
 			runtimeName = w.Runtime
 		}
-		rtSpawner, rtErr := runtimes.GetSpawner(runtimeName)
+		rtSpawner, rtErr := runtimes.GetSpawnerForDispatch(runtimeName, runtimes.DispatchPolicy{
+			IntendedUse: runtimes.IntendedUseControlledPoC,
+		})
 		if rtErr != nil {
 			return fmt.Errorf("cannot resolve runtime %q for world %s: %w", runtimeName, worldID, rtErr)
 		}

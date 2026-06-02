@@ -93,7 +93,9 @@ func resolveRuntimeName(u *models.World) string {
 // world's chosen runtime is pinned for its whole lifetime.
 func (a *Architect) resolveSpawner(u *models.World) (runtimes.Spawner, error) {
 	name := resolveRuntimeName(u)
-	rt, err := runtimes.GetSpawner(name)
+	rt, err := runtimes.GetSpawnerForDispatch(name, runtimes.DispatchPolicy{
+		IntendedUse: runtimes.IntendedUseControlledPoC,
+	})
 	if err != nil || rt == nil {
 		return nil, fmt.Errorf("world runtime %q is not registered: %w", name, err)
 	}
