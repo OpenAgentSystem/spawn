@@ -42,9 +42,9 @@ func TestSaveManifest_WritesYAML(t *testing.T) {
 	initAgent(t, "neo")
 
 	m := &Manifest{
-		Name:     "neo",
-		Role:     "chief",
-		Deps:  []string{"spwn:unix", "spwn:python", "kung-fu"},
+		Name: "neo",
+		Role: "chief",
+		Deps: []string{"spwn:unix", "spwn:python", "kung-fu"},
 	}
 	if err := SaveManifest("neo", m); err != nil {
 		t.Fatalf("SaveManifest: %v", err)
@@ -96,15 +96,21 @@ func TestLoadManifest_RoundtripPreservesFields(t *testing.T) {
 	initAgent(t, "curie")
 
 	original := &Manifest{
-		Name: "curie",
-		Role: "worker",
-		Team: "research",
+		Name:    "curie",
+		Version: "v2",
+		Role:    "worker",
+		Team:    "research",
 		Runtime: RuntimeConfig{
 			Backend:  "claude-code",
 			Provider: "anthropic",
 			Model:    "claude-sonnet-4-6",
 		},
-		Deps:  []string{"spwn:python", "spwn:unix", "paper-reading"},
+		Rollout: RolloutConfig{
+			ActiveVersion: "v1",
+			CanaryVersion: "v2",
+			CanaryPercent: 50,
+		},
+		Deps: []string{"spwn:python", "spwn:unix", "paper-reading"},
 	}
 	if err := SaveManifest("curie", original); err != nil {
 		t.Fatal(err)
@@ -119,6 +125,12 @@ func TestLoadManifest_RoundtripPreservesFields(t *testing.T) {
 	}
 	if loaded.Runtime.Backend != "claude-code" {
 		t.Errorf("Runtime.Backend = %q", loaded.Runtime.Backend)
+	}
+	if loaded.Version != "v2" {
+		t.Errorf("Version = %q, want v2", loaded.Version)
+	}
+	if loaded.Rollout.ActiveVersion != "v1" || loaded.Rollout.CanaryVersion != "v2" || loaded.Rollout.CanaryPercent != 50 {
+		t.Errorf("Rollout drifted: %+v", loaded.Rollout)
 	}
 	if len(loaded.Deps) != 3 || loaded.Deps[0] != "spwn:python" {
 		t.Errorf("Packages drifted: %v", loaded.Deps)

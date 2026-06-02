@@ -8,11 +8,11 @@ import (
 	"os"
 	"time"
 
+	"spwn.sh/packages/activity"
 	"spwn.sh/packages/agent/internal/evolution"
 	"spwn.sh/packages/agent/internal/journal"
 	"spwn.sh/packages/agent/internal/mind"
 	"spwn.sh/packages/agent/internal/session"
-	"spwn.sh/packages/activity"
 )
 
 // ErrNotFound is returned when an agent name has no matching on-disk
@@ -138,6 +138,12 @@ func ImportMind(name string, archivePath string) error {
 // session to the agent's journal directory.
 func AppendJournal(mindPath, worldID string, exitCode int, duration time.Duration) error {
 	return journal.Append(mindPath, worldID, exitCode, duration)
+}
+
+// AppendJournalWithRollout writes a session journal entry tagged with
+// the agent version/cohort that handled the run.
+func AppendJournalWithRollout(mindPath, worldID, version, cohort string, exitCode int, duration time.Duration) error {
+	return journal.AppendWithRollout(mindPath, worldID, version, cohort, exitCode, duration)
 }
 
 // ListJournal returns the last n journal entries from the agent's journal

@@ -218,6 +218,7 @@ func (a *Architect) Spawn(ctx context.Context, opts SpawnOpts) (*SpawnResult, er
 	} else if opts.AgentName != "" {
 		agentNamesToValidate = append(agentNamesToValidate, opts.AgentName)
 	}
+	agentRollouts := make(map[string]RolloutDecision, len(agentNamesToValidate))
 	for _, name := range agentNamesToValidate {
 		if err := agent.ValidateMind(name); err != nil {
 			return nil, err
@@ -226,9 +227,15 @@ func (a *Architect) Spawn(ctx context.Context, opts SpawnOpts) (*SpawnResult, er
 		// Parse agent.yaml (optional). Used for future composition validation
 		// against the world's available tools. The chief-mode detection
 		// already ran further up so the bind-mounts are committed.
-		if _, err := agent.LoadManifestPath(agent.AgentDir(name)); err != nil {
+		manifest, err := agent.LoadManifestPath(agent.AgentDir(name))
+		if err != nil {
 			return nil, fmt.Errorf("load agent manifest for %s: %w", name, err)
 		}
+		rollout, err := resolveAgentRollout(name, id, manifest)
+		if err != nil {
+			return nil, err
+		}
+		agentRollouts[name] = rollout
 	}
 
 	// Resolve compile. SPWN_BASE_IMAGE and opts.Image both mean "use this
@@ -494,20 +501,28 @@ func (a *Architect) Spawn(ctx context.Context, opts SpawnOpts) (*SpawnResult, er
 		worldRecord.AgentID = platform.GenerateAgentID(opts.Agents[0].Name)
 		for _, spec := range opts.Agents {
 			role := agent.DefaultRole(spec.Role)
+			rollout := agentRollouts[spec.Name]
 			worldRecord.Agents = append(worldRecord.Agents, models.AgentRecord{
-				Name:    spec.Name,
-				AgentID: platform.GenerateAgentID(spec.Name),
-				Role:    role,
-				Status:  models.StatusIdle,
+				Name:          spec.Name,
+				AgentID:       platform.GenerateAgentID(spec.Name),
+				Role:          role,
+				Version:       rollout.Version,
+				RolloutCohort: rollout.Cohort,
+				CanaryPercent: rollout.CanaryPercent,
+				Status:        models.StatusIdle,
 			})
 		}
 	} else if opts.AgentName != "" {
+		rollout := agentRollouts[opts.AgentName]
 		worldRecord.AgentID = platform.GenerateAgentID(opts.AgentName)
 		worldRecord.Agents = []models.AgentRecord{{
-			Name:    opts.AgentName,
-			AgentID: worldRecord.AgentID,
-			Role:    "worker",
-			Status:  models.StatusIdle,
+			Name:          opts.AgentName,
+			AgentID:       worldRecord.AgentID,
+			Role:          "worker",
+			Version:       rollout.Version,
+			RolloutCohort: rollout.Cohort,
+			CanaryPercent: rollout.CanaryPercent,
+			Status:        models.StatusIdle,
 		}}
 	}
 

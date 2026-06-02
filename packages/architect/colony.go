@@ -34,6 +34,10 @@ func (a *Architect) DeployAgent(ctx context.Context, worldID, agentName, role st
 	if err := agent.ValidateMind(agentName); err != nil {
 		return fmt.Errorf("agent %q: %w", agentName, err)
 	}
+	manifest, err := agent.LoadManifest(agentName)
+	if err != nil {
+		return fmt.Errorf("load agent manifest for %s: %w", agentName, err)
+	}
 
 	u, err := a.rstate.Get(worldID)
 	if err != nil {
@@ -51,11 +55,18 @@ func (a *Architect) DeployAgent(ctx context.Context, worldID, agentName, role st
 
 	resolvedRole := agent.DefaultRole(role)
 	agentID := platform.GenerateAgentID(agentName)
+	rollout, err := resolveAgentRollout(agentName, worldID, manifest)
+	if err != nil {
+		return err
+	}
 	rec := models.AgentRecord{
-		Name:    agentName,
-		AgentID: agentID,
-		Role:    resolvedRole,
-		Status:  models.StatusRunning,
+		Name:          agentName,
+		AgentID:       agentID,
+		Role:          resolvedRole,
+		Version:       rollout.Version,
+		RolloutCohort: rollout.Cohort,
+		CanaryPercent: rollout.CanaryPercent,
+		Status:        models.StatusRunning,
 	}
 
 	// 1. Create the per-agent per-world layout on the host. This
@@ -79,7 +90,7 @@ func (a *Architect) DeployAgent(ctx context.Context, worldID, agentName, role st
 	// copied-in home. We only handle agents/* entries — the world/*
 	// files already exist from spawn time.
 	hotTree, err := transpile.Compile(resolveRuntimeName(u), transpile.Input{
-		Deps: nil,
+		Deps:          nil,
 		VerifiedTools: nil,
 		WorldID:       worldID,
 		Agents:        []transpile.AgentInput{{Name: rec.Name, Role: resolvedRole}},
@@ -167,11 +178,22 @@ func (a *Architect) SpawnAgents(ctx context.Context, worldID string, agents []Ag
 		if err := a.rstate.UpdateAgentStatus(worldID, agentID, models.StatusCreating); err != nil {
 			// Agent not yet registered (shouldn't happen in normal flow) - add it
 			role := agent.DefaultRole(spec.Role)
+			manifest, loadErr := agent.LoadManifest(spec.Name)
+			if loadErr != nil {
+				return fmt.Errorf("load agent manifest for %s: %w", spec.Name, loadErr)
+			}
+			rollout, rolloutErr := resolveAgentRollout(spec.Name, worldID, manifest)
+			if rolloutErr != nil {
+				return rolloutErr
+			}
 			rec := models.AgentRecord{
-				Name:    spec.Name,
-				AgentID: agentID,
-				Role:    role,
-				Status:  models.StatusCreating,
+				Name:          spec.Name,
+				AgentID:       agentID,
+				Role:          role,
+				Version:       rollout.Version,
+				RolloutCohort: rollout.Cohort,
+				CanaryPercent: rollout.CanaryPercent,
+				Status:        models.StatusCreating,
 			}
 			if addErr := a.rstate.AddAgent(worldID, rec); addErr != nil {
 				return fmt.Errorf("register agent %q: %w", spec.Name, addErr)

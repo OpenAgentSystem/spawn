@@ -315,3 +315,30 @@ func TestAppendJournal_CreatesEntry(t *testing.T) {
 		t.Errorf("Expected world ID %q, got %q", "world-123", entries[0].WorldID)
 	}
 }
+
+func TestAppendJournalWithRollout_PreservesVersionMetadata(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SPWN_HOME", dir)
+
+	_, err := InitMind("rollout-agent")
+	if err != nil {
+		t.Fatalf("InitMind failed: %v", err)
+	}
+
+	mindPath := AgentDir("rollout-agent")
+	err = AppendJournalWithRollout(mindPath, "world-456", "v2", "canary", 0, 2*time.Minute)
+	if err != nil {
+		t.Fatalf("AppendJournalWithRollout failed: %v", err)
+	}
+
+	entries, err := ListJournal(mindPath, 10)
+	if err != nil {
+		t.Fatalf("ListJournal failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Expected 1 journal entry, got %d", len(entries))
+	}
+	if entries[0].Version != "v2" || entries[0].Cohort != "canary" {
+		t.Fatalf("rollout metadata = version %q cohort %q, want v2/canary", entries[0].Version, entries[0].Cohort)
+	}
+}

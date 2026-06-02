@@ -9,6 +9,7 @@ import (
 	"spwn.sh/packages/agent"
 	"spwn.sh/packages/container/backend"
 	"spwn.sh/packages/runtimes"
+	"spwn.sh/packages/world/models"
 )
 
 // SpawnAgent execs the world's runtime interactively inside its
@@ -44,7 +45,8 @@ func (a *Architect) SpawnAgent(ctx context.Context, worldID, agentName string) e
 	})
 
 	// Forward auth credentials to the exec
-	env := agentEnv()
+	rec := findAgentRecord(u, agentName)
+	env := agentEnv(rec)
 
 	startTime := time.Now()
 
@@ -73,7 +75,7 @@ func (a *Architect) SpawnAgent(ctx context.Context, worldID, agentName string) e
 	if err != nil {
 		ec = 1
 	}
-	if journalErr := agent.AppendJournal(agentPath, worldID, ec, duration); journalErr != nil {
+	if journalErr := agent.AppendJournalWithRollout(agentPath, worldID, rec.Version, rec.RolloutCohort, ec, duration); journalErr != nil {
 		log.Printf("warning: failed to write journal: %v", journalErr)
 	}
 
@@ -114,7 +116,7 @@ func (a *Architect) SpawnAgentDetached(ctx context.Context, worldID, agentName s
 		WorldID:   worldID,
 	})
 
-	env := agentEnv()
+	env := agentEnv(findAgentRecord(u, agentName))
 
 	// Save session for detached mode (best-effort, no journal since exit unknown)
 	agentPath := agent.AgentDir(agentName)
@@ -137,7 +139,25 @@ func (a *Architect) SpawnAgentDetached(ctx context.Context, worldID, agentName s
 }
 
 // agentEnv builds environment variables for agent execution inside containers.
-func agentEnv() []string {
-	return DockerEnvVars()
+func agentEnv(rec models.AgentRecord) []string {
+	env := DockerEnvVars()
+	if rec.Version != "" {
+		env = append(env, "SPWN_AGENT_VERSION="+rec.Version)
+	}
+	if rec.RolloutCohort != "" {
+		env = append(env, "SPWN_ROLLOUT_COHORT="+rec.RolloutCohort)
+	}
+	return env
 }
 
+func findAgentRecord(w *models.World, agentName string) models.AgentRecord {
+	if w == nil {
+		return models.AgentRecord{Name: agentName}
+	}
+	for _, rec := range w.Agents {
+		if rec.Name == agentName {
+			return rec
+		}
+	}
+	return models.AgentRecord{Name: agentName}
+}
