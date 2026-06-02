@@ -1,0 +1,10 @@
+name: GridFastAgent
+description: GridFastAgent production agent dispatched through Spawn supply.
+role: worker
+runtime:
+  backend: spwn:codex
+dependencies: []
+metadata:
+  adapter_spec_version: "1.0"
+  spawn_api_path: /v1/spawn/dispatch
+  legacy_direct_invoke: deprecated
