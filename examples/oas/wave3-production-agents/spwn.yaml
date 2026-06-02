@@ -1,0 +1,31 @@
+name: wave3-production-agents
+worlds:
+  spawn-production:
+    agents:
+      - narrator-ai
+      - GridFastAgent
+      - hire-app
+      - closure-bot
+      - agency-agents
+metadata:
+  adapter_spec_version: "1.0"
+  spawn_api_path: /v1/spawn/dispatch
+  legacy_direct_invoke: deprecated
+  issue_url: https://github.com/OpenAgentSystem/spawn/issues/18
+  first_dispatch_utc:
+    narrator-ai: "2026-06-02T09:00:00Z"
+    GridFastAgent: "2026-06-02T09:10:00Z"
+    hire-app: "2026-06-02T09:20:00Z"
+    closure-bot: "2026-06-02T09:30:00Z"
+    agency-agents: "2026-06-02T09:40:00Z"
+  repositories:
+    narrator-ai: GridLtd-ProductDev/narrator-ai-py
+    GridFastAgent: OpenAgentSystem/agent-services
+    hire-app: OpenAgentSystem/hire-app
+    closure-bot: OpenAgentSystem/closure-bot
+    agency-agents: OpenAgentSystem/agency-agents
+capabilities:
+  required:
+    - agent.spawn
+    - agent.dispatch
+    - action_journal.write
