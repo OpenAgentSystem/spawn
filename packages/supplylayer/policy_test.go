@@ -91,6 +91,18 @@ func TestEvaluateDeniesUnknownToSAndCapabilityDrift(t *testing.T) {
 	}
 }
 
+func TestEvaluateDeniesEmptyCapabilities(t *testing.T) {
+	registry := DefaultWave1Registry()
+	req := validLaunch("codex", nil)
+	result := registry.Evaluate(req)
+	if result.Decision != DecisionDeny {
+		t.Fatalf("expected deny, got %s", result.Decision)
+	}
+	if got := strings.Join(result.Reasons, "|"); !strings.Contains(got, "capabilities are required") {
+		t.Fatalf("expected capabilities reason, got %v", result.Reasons)
+	}
+}
+
 func validLaunch(brand string, caps []string) LaunchRequest {
 	return LaunchRequest{
 		Brand:        brand,

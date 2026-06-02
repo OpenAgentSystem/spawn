@@ -167,6 +167,9 @@ func (r Registry) Evaluate(req LaunchRequest) GateResult {
 	if brand.ToS == ToSConditional && req.CustomerData {
 		reasons = append(reasons, "tos conditional brand cannot receive customer data")
 	}
+	if len(req.Capabilities) == 0 {
+		reasons = append(reasons, "capabilities are required")
+	}
 	if missing := missingCapabilities(req.Capabilities, brand.AllowedCapabilities); len(missing) > 0 {
 		reasons = append(reasons, "capability not allowed: "+strings.Join(missing, ","))
 	}

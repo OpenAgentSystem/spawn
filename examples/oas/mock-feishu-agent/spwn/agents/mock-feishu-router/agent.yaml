@@ -1,5 +1,6 @@
 name: mock-feishu-router
+description: Routes mock Feishu messages for OAS supply-layer demos.
 role: worker
 runtime:
   backend: spwn:codex
-deps: []
+dependencies: []
