@@ -18,33 +18,48 @@ func TestResolveAgentRollout_CanaryProgression(t *testing.T) {
 
 	stages := []struct {
 		percent int
-		wantMin int
-		wantMax int
+		want    bool
 	}{
-		{percent: 5, wantMin: 1, wantMax: 9},
-		{percent: 50, wantMin: 40, wantMax: 60},
-		{percent: 100, wantMin: 100, wantMax: 100},
+		{percent: 5, want: true},
+		{percent: 5, want: false},
+		{percent: 50, want: true},
+		{percent: 50, want: false},
+		{percent: 100, want: true},
 	}
 
 	for _, stage := range stages {
 		m.Rollout.CanaryPercent = stage.percent
-		var canary int
-		for i := 0; i < 100; i++ {
-			decision, err := resolveAgentRollout("neo", fmt.Sprintf("world-%03d", i), m)
-			if err != nil {
-				t.Fatalf("resolveAgentRollout: %v", err)
-			}
-			if decision.Cohort == rolloutCohortCanary {
-				canary++
-				if decision.Version != "v2" {
-					t.Fatalf("canary version = %q, want v2", decision.Version)
-				}
-			}
+		worldID := findRolloutFixtureWorldID(t, "neo", stage.percent, stage.want)
+		decision, err := resolveAgentRollout("neo", worldID, m)
+		if err != nil {
+			t.Fatalf("resolveAgentRollout: %v", err)
 		}
-		if canary < stage.wantMin || canary > stage.wantMax {
-			t.Fatalf("%d%% canary selected %d/100, want between %d and %d", stage.percent, canary, stage.wantMin, stage.wantMax)
+		want := rolloutCohortActive
+		if stage.want {
+			want = rolloutCohortCanary
+		}
+		if decision.Cohort != want {
+			t.Fatalf("%s at %d%% cohort = %q, want %q", worldID, stage.percent, decision.Cohort, want)
+		}
+		if decision.Cohort == rolloutCohortCanary && decision.Version != "v2" {
+			t.Fatalf("canary version = %q, want v2", decision.Version)
+		}
+		if decision.Cohort == rolloutCohortActive && decision.Version != "v1" {
+			t.Fatalf("active version = %q, want v1", decision.Version)
 		}
 	}
+}
+
+func findRolloutFixtureWorldID(t *testing.T, agentName string, percent int, wantCanary bool) string {
+	t.Helper()
+	for i := 0; i < 1000; i++ {
+		worldID := fmt.Sprintf("world-%03d", i)
+		if rolloutBucket(worldID, agentName) < percent == wantCanary {
+			return worldID
+		}
+	}
+	t.Fatalf("no rollout fixture found for %d%% canary=%t", percent, wantCanary)
+	return ""
 }
 
 func TestResolveAgentRollout_RejectsInvalidPercent(t *testing.T) {

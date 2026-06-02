@@ -143,10 +143,11 @@ If no message is provided, opens an interactive session inside the container.`,
 				"-e", "SPWN_AGENT_NAME="+name,
 				"-e", "SPWN_WORLD_ID="+worldID,
 			)
-			if rec := findWorldAgentRecord(w, name); rec.Version != "" {
+			rec := findWorldAgentRecord(w, name)
+			if rec.Version != "" {
 				args = append(args, "-e", "SPWN_AGENT_VERSION="+rec.Version)
 			}
-			if rec := findWorldAgentRecord(w, name); rec.RolloutCohort != "" {
+			if rec.RolloutCohort != "" {
 				args = append(args, "-e", "SPWN_ROLLOUT_COHORT="+rec.RolloutCohort)
 			}
 			// Credentials still come from /credentials/.env via the
