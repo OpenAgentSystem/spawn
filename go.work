@@ -6,6 +6,7 @@ use (
 	./apps/gate
 	./packages/activity
 	./packages/agent
+	./packages/agentplatform
 	./packages/architect
 	./packages/auth
 	./packages/automation
