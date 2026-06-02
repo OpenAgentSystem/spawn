@@ -42,6 +42,19 @@ func TestInit_BackendPinIsWrittenWhenRequested(t *testing.T) {
 	}
 }
 
+func TestInit_AgentManifestDeclaresVersion(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := Init(dir, Opts{Name: "versioned"}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	body := readString(t, filepath.Join(dir, "spwn", "agents", "neo", "agent.yaml"))
+	if !strings.Contains(body, "version: v1") {
+		t.Fatalf("agent.yaml missing version tag:\n%s", body)
+	}
+}
+
 func TestInit_WritesExpectedStarterFiles(t *testing.T) {
 	dir := t.TempDir()
 

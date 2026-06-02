@@ -6,6 +6,7 @@ import (
 
 	"spwn.sh/packages/container/backend"
 	"spwn.sh/packages/runtimes"
+	"spwn.sh/packages/world/models"
 )
 
 // SpawnNPC runs an NPC - an ephemeral agent with a single task, no Mind, no persistence.
@@ -38,7 +39,7 @@ func (a *Architect) SpawnNPC(ctx context.Context, worldID string, task string) e
 		Prompt: task,
 	})
 
-	env := agentEnv()
+	env := agentEnv(models.AgentRecord{})
 
 	exitCode, err := a.backend.Exec(ctx, u.ContainerID, backend.ExecConfig{
 		Cmd: cmd,

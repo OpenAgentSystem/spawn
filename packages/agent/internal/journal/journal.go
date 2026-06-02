@@ -15,6 +15,8 @@ import (
 type Entry struct {
 	Filename  string
 	WorldID   string
+	Version   string
+	Cohort    string
 	Outcome   string
 	ExitCode  int
 	Duration  time.Duration
@@ -23,6 +25,12 @@ type Entry struct {
 
 // Append writes a new journal entry to the Mind's journal directory.
 func Append(mindPath, worldID string, exitCode int, duration time.Duration) error {
+	return AppendWithRollout(mindPath, worldID, "", "", exitCode, duration)
+}
+
+// AppendWithRollout writes a journal entry annotated with the agent
+// version/cohort that handled the run.
+func AppendWithRollout(mindPath, worldID, version, cohort string, exitCode int, duration time.Duration) error {
 	dir := filepath.Join(mindPath, "journal")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create journal dir: %w", err)
@@ -36,15 +44,24 @@ func Append(mindPath, worldID string, exitCode int, duration time.Duration) erro
 
 	filename := fmt.Sprintf("%s_%s.md", now.Format("2006-01-02_150405.000000000"), worldID)
 
+	var rolloutLines string
+	if version != "" {
+		rolloutLines += fmt.Sprintf("- **Agent Version:** %s\n", version)
+	}
+	if cohort != "" {
+		rolloutLines += fmt.Sprintf("- **Rollout Cohort:** %s\n", cohort)
+	}
+
 	content := fmt.Sprintf(`# Session Journal
 
 - **World:** %s
+%s
 - **Outcome:** %s
 - **Exit Code:** %d
 - **Duration:** %s
 - **Started:** %s
 - **Ended:** %s
-`, worldID, outcome, exitCode, formatDuration(duration), now.Add(-duration).Format(time.RFC3339), now.Format(time.RFC3339))
+`, worldID, rolloutLines, outcome, exitCode, formatDuration(duration), now.Add(-duration).Format(time.RFC3339), now.Format(time.RFC3339))
 
 	path := filepath.Join(dir, filename)
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
@@ -125,6 +142,12 @@ func parseEntry(dir, filename string) (*Entry, error) {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "- **Outcome:**") {
 			entry.Outcome = strings.TrimSpace(strings.TrimPrefix(line, "- **Outcome:**"))
+		}
+		if strings.HasPrefix(line, "- **Agent Version:**") {
+			entry.Version = strings.TrimSpace(strings.TrimPrefix(line, "- **Agent Version:**"))
+		}
+		if strings.HasPrefix(line, "- **Rollout Cohort:**") {
+			entry.Cohort = strings.TrimSpace(strings.TrimPrefix(line, "- **Rollout Cohort:**"))
 		}
 		if strings.HasPrefix(line, "- **Exit Code:**") {
 			fmt.Sscanf(strings.TrimPrefix(line, "- **Exit Code:**"), "%d", &entry.ExitCode)

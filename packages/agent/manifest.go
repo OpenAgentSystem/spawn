@@ -14,6 +14,7 @@ type Manifest = intmanifest.Manifest
 
 // RuntimeConfig is the per-agent runtime override.
 type RuntimeConfig = intmanifest.RuntimeConfig
+type RolloutConfig = intmanifest.RolloutConfig
 
 // DepPolicy is the per-dependency allow/deny filter declared in
 // agent.yaml. Re-exported so callers (architect, compile boundary)

@@ -20,6 +20,9 @@ import (
 // it a tool, a content-only body makes it a skill).
 type Manifest struct {
 	Name string `yaml:"name,omitempty"`
+	// Version is the deployable agent version tag. New scaffolds
+	// write "v1"; legacy manifests may omit it and remain loadable.
+	Version string `yaml:"version,omitempty"`
 
 	// Description is a mandatory one-line pitch of what this agent is
 	// for — the equivalent of the `description:` field in the skill
@@ -31,6 +34,7 @@ type Manifest struct {
 	Role        string        `yaml:"role,omitempty"`
 	Team        string        `yaml:"team,omitempty"`
 	Runtime     RuntimeConfig `yaml:"runtime,omitempty"`
+	Rollout     RolloutConfig `yaml:"rollout,omitempty"`
 
 	// Deps is the flat list of dependency refs (`spwn:x`,
 	// `skill:refine`, …). Populated by UnmarshalYAML from either
@@ -68,10 +72,12 @@ type DepPolicy struct {
 // converts between the two.
 type rawManifest struct {
 	Name        string        `yaml:"name,omitempty"`
+	Version     string        `yaml:"version,omitempty"`
 	Description string        `yaml:"description,omitempty"`
 	Role        string        `yaml:"role,omitempty"`
 	Team        string        `yaml:"team,omitempty"`
 	Runtime     RuntimeConfig `yaml:"runtime,omitempty"`
+	Rollout     RolloutConfig `yaml:"rollout,omitempty"`
 	Deps        yaml.Node     `yaml:"dependencies,omitempty"`
 }
 
@@ -84,10 +90,12 @@ func (m *Manifest) UnmarshalYAML(node *yaml.Node) error {
 		return err
 	}
 	m.Name = raw.Name
+	m.Version = raw.Version
 	m.Description = raw.Description
 	m.Role = raw.Role
 	m.Team = raw.Team
 	m.Runtime = raw.Runtime
+	m.Rollout = raw.Rollout
 	m.Deps = nil
 	m.DepPolicies = nil
 	if raw.Deps.Kind == 0 {
@@ -132,17 +140,21 @@ func (m *Manifest) UnmarshalYAML(node *yaml.Node) error {
 func (m Manifest) MarshalYAML() (any, error) {
 	out := struct {
 		Name        string        `yaml:"name,omitempty"`
+		Version     string        `yaml:"version,omitempty"`
 		Description string        `yaml:"description,omitempty"`
 		Role        string        `yaml:"role,omitempty"`
 		Team        string        `yaml:"team,omitempty"`
 		Runtime     RuntimeConfig `yaml:"runtime,omitempty"`
+		Rollout     RolloutConfig `yaml:"rollout,omitempty"`
 		Deps        []any         `yaml:"dependencies,omitempty"`
 	}{
 		Name:        m.Name,
+		Version:     m.Version,
 		Description: m.Description,
 		Role:        m.Role,
 		Team:        m.Team,
 		Runtime:     m.Runtime,
+		Rollout:     m.Rollout,
 	}
 	for _, ref := range m.Deps {
 		if pol, ok := m.DepPolicies[ref]; ok && (len(pol.Allow) > 0 || len(pol.Deny) > 0) {
@@ -167,4 +179,13 @@ type RuntimeConfig struct {
 	Provider string `yaml:"provider,omitempty"`
 	Model    string `yaml:"model,omitempty"`
 	Auth     string `yaml:"auth,omitempty"`
+}
+
+// RolloutConfig controls active/canary version routing for an agent.
+// v_active is the stable version receiving baseline traffic; v_canary
+// is the candidate version that receives canary_percent of requests.
+type RolloutConfig struct {
+	ActiveVersion string `yaml:"v_active,omitempty"`
+	CanaryVersion string `yaml:"v_canary,omitempty"`
+	CanaryPercent int    `yaml:"canary_percent,omitempty"`
 }
