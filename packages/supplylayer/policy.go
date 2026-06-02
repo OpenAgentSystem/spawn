@@ -3,7 +3,6 @@ package supplylayer
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 )
@@ -14,6 +13,17 @@ type Decision string
 const (
 	DecisionAllow Decision = "allow"
 	DecisionDeny  Decision = "deny"
+)
+
+// Gate names the fail-closed pre-spawn gate that produced a decision.
+type Gate string
+
+const (
+	GatePoLP          Gate = "polp"
+	GateToS           Gate = "tos"
+	GateAdapter       Gate = "adapter"
+	GateCapability    Gate = "capability"
+	GateActionJournal Gate = "action_journal"
 )
 
 // ToSState records the legal/commercial status for a runtime brand.
@@ -75,6 +85,7 @@ type PoLPDecision struct {
 // GateResult explains an allow/deny outcome.
 type GateResult struct {
 	Decision Decision
+	Gate     Gate
 	Reasons  []string
 }
 
@@ -137,46 +148,40 @@ func DefaultWave1Registry() Registry {
 
 // Evaluate enforces the OAS supply-layer pre-spawn contract.
 func (r Registry) Evaluate(req LaunchRequest) GateResult {
-	var reasons []string
-	brand, ok := r.Brands[normalize(req.Brand)]
-	if !ok {
-		reasons = append(reasons, "unknown brand")
-		return GateResult{Decision: DecisionDeny, Reasons: reasons}
+	brand, adapterErr := r.resolveAdapter(req)
+	ordered := []struct {
+		gate Gate
+		err  error
+	}{
+		{GatePoLP, validatePoLP(req.PoLPDecision)},
+		{GateToS, validateToS(brand, req.CustomerData, adapterErr)},
+		{GateAdapter, validateAdapter(brand, req, adapterErr)},
+		{GateCapability, validateCapabilities(req.Capabilities, brand.AllowedCapabilities, adapterErr)},
+		{GateActionJournal, validateActionJournal(req.ActionJournal)},
 	}
-	if req.AgentID == "" {
-		reasons = append(reasons, "missing agent id")
-	}
-	if req.HumanID == "" {
-		reasons = append(reasons, "missing human id")
-	}
-	if req.IssueURL == "" {
-		reasons = append(reasons, "missing issue url")
-	}
-	if err := validateActionJournal(req.ActionJournal); err != nil {
-		reasons = append(reasons, err.Error())
-	}
-	if err := validatePoLP(req.PoLPDecision); err != nil {
-		reasons = append(reasons, err.Error())
-	}
-	if req.AdapterSpecWant != "" && brand.AdapterSpecVersion != req.AdapterSpecWant {
-		reasons = append(reasons, fmt.Sprintf("adapter spec mismatch: have %s want %s", brand.AdapterSpecVersion, req.AdapterSpecWant))
-	}
-	if brand.ToS == ToSBlocked || brand.ToS == ToSUnknown {
-		reasons = append(reasons, "tos gate not approved")
-	}
-	if brand.ToS == ToSConditional && req.CustomerData {
-		reasons = append(reasons, "tos conditional brand cannot receive customer data")
-	}
-	if len(req.Capabilities) == 0 {
-		reasons = append(reasons, "capabilities are required")
-	}
-	if missing := missingCapabilities(req.Capabilities, brand.AllowedCapabilities); len(missing) > 0 {
-		reasons = append(reasons, "capability not allowed: "+strings.Join(missing, ","))
-	}
-	if len(reasons) > 0 {
-		return GateResult{Decision: DecisionDeny, Reasons: reasons}
+	for _, step := range ordered {
+		if step.err != nil {
+			return GateResult{Decision: DecisionDeny, Gate: step.gate, Reasons: []string{step.err.Error()}}
+		}
 	}
 	return GateResult{Decision: DecisionAllow}
+}
+
+func (r Registry) resolveAdapter(req LaunchRequest) (BrandPolicy, error) {
+	if req.AgentID == "" {
+		return BrandPolicy{}, errors.New("missing agent id")
+	}
+	if req.HumanID == "" {
+		return BrandPolicy{}, errors.New("missing human id")
+	}
+	if req.IssueURL == "" {
+		return BrandPolicy{}, errors.New("missing issue url")
+	}
+	brand, ok := r.Brands[normalize(req.Brand)]
+	if !ok {
+		return BrandPolicy{}, errors.New("unknown brand")
+	}
+	return brand, nil
 }
 
 func validateActionJournal(cfg ActionJournalConfig) error {
@@ -199,6 +204,42 @@ func validatePoLP(decision PoLPDecision) error {
 	return nil
 }
 
+func validateToS(brand BrandPolicy, customerData bool, adapterErr error) error {
+	if adapterErr != nil {
+		return nil
+	}
+	if brand.ToS == ToSBlocked || brand.ToS == ToSUnknown {
+		return errors.New("tos gate not approved")
+	}
+	if brand.ToS == ToSConditional && customerData {
+		return errors.New("tos conditional brand cannot receive customer data")
+	}
+	return nil
+}
+
+func validateAdapter(brand BrandPolicy, req LaunchRequest, adapterErr error) error {
+	if adapterErr != nil {
+		return adapterErr
+	}
+	if req.AdapterSpecWant != "" && brand.AdapterSpecVersion != req.AdapterSpecWant {
+		return fmt.Errorf("adapter spec mismatch: have %s want %s", brand.AdapterSpecVersion, req.AdapterSpecWant)
+	}
+	return nil
+}
+
+func validateCapabilities(requested, allowed []string, adapterErr error) error {
+	if adapterErr != nil {
+		return nil
+	}
+	if len(requested) == 0 {
+		return errors.New("capabilities are required")
+	}
+	if missing := missingCapabilities(requested, allowed); len(missing) > 0 {
+		return errors.New("capability not allowed: " + strings.Join(missing, ","))
+	}
+	return nil
+}
+
 func missingCapabilities(requested, allowed []string) []string {
 	allowedSet := map[string]bool{}
 	for _, c := range allowed {
@@ -210,7 +251,6 @@ func missingCapabilities(requested, allowed []string) []string {
 			missing = append(missing, c)
 		}
 	}
-	sort.Strings(missing)
 	return missing
 }
 

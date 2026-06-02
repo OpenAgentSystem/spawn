@@ -1,7 +1,6 @@
 package supplylayer
 
 import (
-	"strings"
 	"testing"
 	"time"
 )
@@ -35,7 +34,11 @@ func TestEvaluateAllowsWave1InternalLaunch(t *testing.T) {
 func TestEvaluateDeniesMissingAuditAndPoLP(t *testing.T) {
 	registry := DefaultWave1Registry()
 	result := registry.Evaluate(LaunchRequest{
-		Brand: "codex",
+		Brand:        "codex",
+		AgentID:      "agent:mock-feishu",
+		HumanID:      "user:paul",
+		IssueURL:     "https://github.com/Gridltd-DevOps/architecture-decisions/issues/29",
+		Capabilities: []string{"agent.spawn"},
 		PoLPDecision: PoLPDecision{
 			Decision: DecisionDeny,
 			Reason:   "no scoped grant",
@@ -44,17 +47,11 @@ func TestEvaluateDeniesMissingAuditAndPoLP(t *testing.T) {
 	if result.Decision != DecisionDeny {
 		t.Fatalf("expected deny, got %s", result.Decision)
 	}
-	joined := strings.Join(result.Reasons, "|")
-	for _, want := range []string{
-		"missing agent id",
-		"missing human id",
-		"missing issue url",
-		"action journal sink is required",
-		"polp denied: no scoped grant",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("missing reason %q in %v", want, result.Reasons)
-		}
+	if result.Gate != GatePoLP {
+		t.Fatalf("expected PoLP gate, got %s", result.Gate)
+	}
+	if got, want := result.Reasons[0], "polp denied: no scoped grant"; got != want {
+		t.Fatalf("reason mismatch: got %q want %q", got, want)
 	}
 }
 
@@ -71,35 +68,111 @@ func TestEvaluateDeniesCustomerDataForConditionalToS(t *testing.T) {
 	if result.Decision != DecisionDeny {
 		t.Fatalf("expected deny, got %s", result.Decision)
 	}
-	if got := strings.Join(result.Reasons, "|"); !strings.Contains(got, "tos conditional brand cannot receive customer data") {
-		t.Fatalf("expected tos customer-data reason, got %v", result.Reasons)
+	if result.Gate != GateToS {
+		t.Fatalf("expected ToS gate, got %s", result.Gate)
+	}
+	if got, want := result.Reasons[0], "tos conditional brand cannot receive customer data"; got != want {
+		t.Fatalf("reason mismatch: got %q want %q", got, want)
 	}
 }
 
-func TestEvaluateDeniesUnknownToSAndCapabilityDrift(t *testing.T) {
+func TestEvaluateDeniesUnknownToSBeforeCapabilityDrift(t *testing.T) {
 	registry := DefaultWave1Registry()
 	req := validLaunch("cursor-cli", []string{"agent.spawn", "tool.write"})
 	result := registry.Evaluate(req)
 	if result.Decision != DecisionDeny {
 		t.Fatalf("expected deny, got %s", result.Decision)
 	}
-	got := strings.Join(result.Reasons, "|")
-	for _, want := range []string{"tos gate not approved", "capability not allowed: tool.write"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("missing reason %q in %v", want, result.Reasons)
-		}
+	if result.Gate != GateToS {
+		t.Fatalf("expected ToS gate before capability gate, got %s", result.Gate)
+	}
+	if got, want := result.Reasons[0], "tos gate not approved"; got != want {
+		t.Fatalf("reason mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestEvaluateGateOrder(t *testing.T) {
+	tests := []struct {
+		name string
+		req  LaunchRequest
+		gate Gate
+	}{
+		{
+			name: "polp first",
+			req: func() LaunchRequest {
+				req := validLaunch("codex", []string{"agent.spawn"})
+				req.PoLPDecision.Decision = DecisionDeny
+				req.PoLPDecision.Reason = "missing grant"
+				req.CustomerData = true
+				req.AdapterSpecWant = "9.9"
+				req.ActionJournal = ActionJournalConfig{}
+				return req
+			}(),
+			gate: GatePoLP,
+		},
+		{
+			name: "tos second",
+			req: func() LaunchRequest {
+				req := validLaunch("codex", []string{"not.allowed"})
+				req.CustomerData = true
+				req.AdapterSpecWant = "9.9"
+				req.ActionJournal = ActionJournalConfig{}
+				return req
+			}(),
+			gate: GateToS,
+		},
+		{
+			name: "adapter third",
+			req: func() LaunchRequest {
+				req := validLaunch("codex", []string{"not.allowed"})
+				req.AdapterSpecWant = "9.9"
+				req.ActionJournal = ActionJournalConfig{}
+				return req
+			}(),
+			gate: GateAdapter,
+		},
+		{
+			name: "capability fourth",
+			req: func() LaunchRequest {
+				req := validLaunch("codex", []string{"not.allowed"})
+				req.ActionJournal = ActionJournalConfig{}
+				return req
+			}(),
+			gate: GateCapability,
+		},
+		{
+			name: "action journal last",
+			req: func() LaunchRequest {
+				req := validLaunch("codex", []string{"agent.spawn"})
+				req.ActionJournal = ActionJournalConfig{}
+				return req
+			}(),
+			gate: GateActionJournal,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := DefaultWave1Registry().Evaluate(tt.req)
+			if result.Decision != DecisionDeny {
+				t.Fatalf("expected deny, got %s", result.Decision)
+			}
+			if result.Gate != tt.gate {
+				t.Fatalf("expected gate %s, got %s with reasons %v", tt.gate, result.Gate, result.Reasons)
+			}
+		})
 	}
 }
 
 func TestEvaluateDeniesEmptyCapabilities(t *testing.T) {
-	registry := DefaultWave1Registry()
-	req := validLaunch("codex", nil)
-	result := registry.Evaluate(req)
+	result := DefaultWave1Registry().Evaluate(validLaunch("codex", nil))
 	if result.Decision != DecisionDeny {
 		t.Fatalf("expected deny, got %s", result.Decision)
 	}
-	if got := strings.Join(result.Reasons, "|"); !strings.Contains(got, "capabilities are required") {
-		t.Fatalf("expected capabilities reason, got %v", result.Reasons)
+	if result.Gate != GateCapability {
+		t.Fatalf("expected capability gate, got %s", result.Gate)
+	}
+	if got, want := result.Reasons[0], "capabilities are required"; got != want {
+		t.Fatalf("reason mismatch: got %q want %q", got, want)
 	}
 }
 
