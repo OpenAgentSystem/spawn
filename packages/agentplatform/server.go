@@ -225,7 +225,9 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	s.storeTask(record)
 
 	status := http.StatusAccepted
-	if record.Status == "failed" {
+	if record.Status == "completed" {
+		status = http.StatusOK
+	} else if record.Status == "failed" {
 		status = http.StatusBadGateway
 	}
 	writeJSON(w, status, DispatchResponse{
@@ -243,7 +245,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	taskID := strings.TrimPrefix(r.URL.Path, "/tasks/")
 	taskID = strings.TrimSuffix(taskID, "/status")
-	if taskID == "" || r.URL.Path != "/tasks/"+taskID+"/status" {
+	if taskID == "" || strings.Contains(taskID, "/") || r.URL.Path != "/tasks/"+taskID+"/status" {
 		writeError(w, http.StatusNotFound, "unknown task status route")
 		return
 	}
@@ -285,27 +287,27 @@ func (s *Server) callAgent(manifest AgentManifest, envelope dispatchEnvelope) (a
 }
 
 func validateManifest(manifest AgentManifest) error {
-	var missing []string
+	var problems []string
 	if manifest.AdapterSpecVersion != adapterSpecV1 {
-		return fmt.Errorf("adapter_spec_version must be %s", adapterSpecV1)
+		problems = append(problems, fmt.Sprintf("adapter_spec_version must be %s", adapterSpecV1))
 	}
 	if manifest.AgentID == "" {
-		missing = append(missing, "agent_id")
+		problems = append(problems, "missing agent_id")
 	}
 	if manifest.Name == "" {
-		missing = append(missing, "name")
+		problems = append(problems, "missing name")
 	}
 	if manifest.Brand == "" {
-		missing = append(missing, "brand")
+		problems = append(problems, "missing brand")
 	}
 	if len(manifest.Capabilities) == 0 {
-		missing = append(missing, "capabilities")
+		problems = append(problems, "missing capabilities")
 	}
 	if manifest.DispatchURL == "" {
-		missing = append(missing, "dispatch_url")
+		problems = append(problems, "missing dispatch_url")
 	}
-	if len(missing) > 0 {
-		return fmt.Errorf("manifest missing required fields: %s", strings.Join(missing, ", "))
+	if len(problems) > 0 {
+		return fmt.Errorf("manifest invalid: %s", strings.Join(problems, ", "))
 	}
 	u, err := url.Parse(manifest.DispatchURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {

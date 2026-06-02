@@ -62,7 +62,7 @@ func TestMockFeishuDemoRegistersReceivesCompletesDispatchViaHTTP(t *testing.T) {
 		Payload: json.RawMessage(`{"source":"mock-feishu","text":"route launch demo"}`),
 	}
 	resp = postJSON(t, server.URL+"/dispatch", dispatch)
-	if resp.StatusCode != http.StatusAccepted {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("dispatch status=%d body=%s", resp.StatusCode, readBody(t, resp))
 	}
 	var dispatchResp DispatchResponse
