@@ -23,8 +23,9 @@ import (
 // than held as state, so a single Architect drives claude-code and
 // codex worlds side-by-side without re-instantiation.
 type Architect struct {
-	backend backend.Backend
-	rstate  *runtimestate.Store
+	backend           backend.Backend
+	rstate            *runtimestate.Store
+	actionJournalSink ActionJournalSink
 }
 
 // New creates an Architect with the given backend and runtimestate
@@ -33,7 +34,7 @@ type Architect struct {
 // runtimes/defaults at the top of this file is the only wiring needed
 // to make every built-in adapter discoverable.
 func New(b backend.Backend, s *runtimestate.Store) *Architect {
-	return &Architect{backend: b, rstate: s}
+	return &Architect{backend: b, rstate: s, actionJournalSink: noopActionJournalSink{}}
 }
 
 // SetSessionID stores a runtime session ID for an agent in a world.

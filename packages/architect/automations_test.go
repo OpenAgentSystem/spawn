@@ -72,6 +72,7 @@ type dispatcherFixture struct {
 
 func newDispatcherFixture(t *testing.T, configName, agentName string) *dispatcherFixture {
 	t.Helper()
+	setAllowLaunchEnv(t, launchCapabilityTalk)
 	mb := newMockBackend()
 	arc, _ := newTestArchitect(t, mb)
 	w := models.World{
@@ -283,4 +284,3 @@ func cmdContains(cmd []string, needle string) bool {
 	}
 	return false
 }
-

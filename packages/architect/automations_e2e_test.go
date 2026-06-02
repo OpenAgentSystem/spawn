@@ -60,6 +60,7 @@ type e2eFixture struct {
 // newE2EFixture sets up a project root + architect + clock at testEpoch.
 func newE2EFixture(t *testing.T) *e2eFixture {
 	t.Helper()
+	setAllowLaunchEnv(t, launchCapabilityTalk)
 	mb := newMockBackend()
 	arc, _ := newTestArchitect(t, mb)
 	root := t.TempDir()
@@ -725,4 +726,3 @@ func TestE2E_OutputTruncatedAtCap(t *testing.T) {
 		t.Errorf("truncated marker missing from output: %s", out[len(out)-50:])
 	}
 }
-

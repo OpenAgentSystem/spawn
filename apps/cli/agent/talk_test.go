@@ -1,9 +1,13 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+
+	"spwn.sh/packages/architect"
+	"spwn.sh/packages/world"
 )
 
 func TestExtractSessionID_ClaudeStreamJSON(t *testing.T) {
@@ -75,6 +79,71 @@ func TestExtractSessionID_CodexJSONL(t *testing.T) {
 				t.Errorf("got %q want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func setAllowLaunchEnv(t *testing.T, capability string) {
+	t.Helper()
+	t.Setenv("SPWN_SUPPLY_HUMAN_ID", "user:paul")
+	t.Setenv("SPWN_SUPPLY_ISSUE_URL", "https://github.com/Gridltd-DevOps/architecture-decisions/issues/29")
+	t.Setenv("SPWN_ACTION_JOURNAL_ENDPOINT", "https://action-journal.internal/events")
+	t.Setenv("SPWN_ACTION_JOURNAL_TENANT_ID", "gridltd")
+	t.Setenv("SPWN_POLP_DECISION", "allow")
+	t.Setenv("SPWN_POLP_SUBJECT_ID", "user:paul")
+	t.Setenv("SPWN_POLP_SCOPE_ID", "issue:29")
+	t.Setenv("SPWN_POLP_CAPABILITY_ID", capability)
+	t.Setenv("SPWN_SUPPLY_CUSTOMER_DATA", "false")
+}
+
+func clearLaunchEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"SPWN_SUPPLY_HUMAN_ID",
+		"SPWN_SUPPLY_ISSUE_URL",
+		"SPWN_ACTION_JOURNAL_ENDPOINT",
+		"SPWN_ACTION_JOURNAL_TENANT_ID",
+		"SPWN_POLP_DECISION",
+		"SPWN_POLP_SUBJECT_ID",
+		"SPWN_POLP_SCOPE_ID",
+		"SPWN_POLP_CAPABILITY_ID",
+		"SPWN_POLP_REASON",
+		"SPWN_SUPPLY_CUSTOMER_DATA",
+	} {
+		t.Setenv(name, "")
+	}
+}
+
+func TestAuthorizeTalkLaunch_AllowsOneShotWithSupplyInputs(t *testing.T) {
+	setAllowLaunchEnv(t, "agent.talk")
+	arc := architect.New(nil, nil)
+	w := &world.World{
+		ID:      "world-cli-allow",
+		Runtime: "codex",
+		Agents:  []world.AgentRecord{{Name: "editor", AgentID: "agent-editor-12345"}},
+	}
+
+	if err := authorizeTalkLaunch(context.Background(), arc, w, "editor", "one-shot"); err != nil {
+		t.Fatalf("authorize talk: %v", err)
+	}
+}
+
+func TestAuthorizeTalkLaunch_DeniesBeforeCLIExecWithReasonCodes(t *testing.T) {
+	clearLaunchEnv(t)
+	arc := architect.New(nil, nil)
+	w := &world.World{
+		ID:      "world-cli-deny",
+		Runtime: "codex",
+		Agents:  []world.AgentRecord{{Name: "editor", AgentID: "agent-editor-12345"}},
+	}
+
+	err := authorizeTalkLaunch(context.Background(), arc, w, "editor", "one-shot")
+	if err == nil {
+		t.Fatal("expected gate denial")
+	}
+	for _, want := range []string{"missing_action_journal", "polp_denied", "missing_tos_customer_data"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("denial missing %q: %v", want, err)
+		}
 	}
 }
 

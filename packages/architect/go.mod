@@ -16,6 +16,7 @@ require (
 	spwn.sh/packages/platform v0.0.0
 	spwn.sh/packages/project v0.0.0
 	spwn.sh/packages/runtimes v0.0.0
+	spwn.sh/packages/supplylayer v0.0.0
 	spwn.sh/packages/transpile v0.0.0
 	spwn.sh/packages/world v0.0.0
 )
@@ -31,6 +32,7 @@ replace (
 	spwn.sh/packages/platform => ../platform
 	spwn.sh/packages/project => ../project
 	spwn.sh/packages/runtimes => ../runtimes
+	spwn.sh/packages/supplylayer => ../supplylayer
 	spwn.sh/packages/transpile => ../transpile
 	spwn.sh/packages/world => ../world
 )

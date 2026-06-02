@@ -12,10 +12,10 @@ import (
 
 	"github.com/spf13/cobra"
 	"spwn.sh/apps/cli/ui"
-	"spwn.sh/packages/auth"
 	"spwn.sh/packages/agent"
-	"spwn.sh/packages/platform"
 	"spwn.sh/packages/architect"
+	"spwn.sh/packages/auth"
+	"spwn.sh/packages/platform"
 	"spwn.sh/packages/runtimes"
 	"spwn.sh/packages/world"
 )
@@ -56,6 +56,7 @@ If no message is provided, opens an interactive session inside the container.`,
 			message = args[1]
 		}
 		s := ui.New()
+		ctx := context.Background()
 
 		if err := agent.ValidateMind(name); err != nil {
 			return fmt.Errorf("agent %q not found\n\n  Create one with: spwn agent create %s", name, name)
@@ -77,6 +78,19 @@ If no message is provided, opens an interactive session inside the container.`,
 			s.Info("Agent:", name)
 			s.Info("World:", worldID)
 			s.Blank()
+		}
+
+		launchPath := "interactive"
+		if message != "" {
+			launchPath = "one-shot"
+		}
+		if err := authorizeTalkLaunch(ctx, arc, w, name, launchPath); err != nil {
+			return err
+		}
+		recordLaunchOutcome := func(err error) {
+			if arc != nil && w != nil {
+				arc.RecordAgentLaunchOutcome(ctx, w, name, "agent.talk", launchPath, err)
+			}
 		}
 
 		// Look up existing session ID for this agent (enables conversation continuity)
@@ -194,6 +208,7 @@ If no message is provided, opens an interactive session inside the container.`,
 				// Suppress stderr in streaming mode (codex emits noisy MCP errors)
 				execCmd.Stderr = nil
 				if err := execCmd.Start(); err != nil {
+					recordLaunchOutcome(err)
 					return formatExecError(err, nil)
 				}
 				scanner := bufio.NewScanner(stdoutPipe)
@@ -209,8 +224,10 @@ If no message is provided, opens an interactive session inside the container.`,
 					}
 				}
 				if err := execCmd.Wait(); err != nil {
+					recordLaunchOutcome(err)
 					return formatExecError(err, nil)
 				}
+				recordLaunchOutcome(nil)
 				return nil
 			}
 
@@ -225,6 +242,7 @@ If no message is provided, opens an interactive session inside the container.`,
 			if err != nil {
 				combined := append([]byte{}, output...)
 				combined = append(combined, stderrBuf.Bytes()...)
+				recordLaunchOutcome(err)
 				return formatExecError(err, combined)
 			}
 
@@ -245,6 +263,7 @@ If no message is provided, opens an interactive session inside the container.`,
 				}
 				fmt.Fprint(os.Stdout, string(output))
 			}
+			recordLaunchOutcome(nil)
 		} else {
 			// Interactive mode
 			dockerArgs := append(buildDockerArgs(true), wrapWithCredentials(runtimeCmd)...)
@@ -254,12 +273,21 @@ If no message is provided, opens an interactive session inside the container.`,
 			execCmd.Stderr = os.Stderr
 
 			if err := execCmd.Run(); err != nil {
+				recordLaunchOutcome(err)
 				return fmt.Errorf("interactive session: %w", err)
 			}
+			recordLaunchOutcome(nil)
 		}
 
 		return nil
 	},
+}
+
+func authorizeTalkLaunch(ctx context.Context, arc *architect.Architect, w *world.World, name, launchPath string) error {
+	if arc == nil || w == nil {
+		return nil
+	}
+	return arc.AuthorizeAgentLaunch(ctx, w, name, "agent.talk", launchPath)
 }
 
 func isContainerRunning(containerID string) bool {

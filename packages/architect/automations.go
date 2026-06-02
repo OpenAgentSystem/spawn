@@ -72,8 +72,14 @@ func (d *AutomationDispatcher) Dispatch(ctx context.Context, req automation.Disp
 		return automation.DispatchResult{Err: fmt.Errorf("agent %q is not in world %q", req.Agent, req.World)}
 	}
 
+	admission, err := d.arc.authorizeAgentLaunch(ctx, world, req.Agent, launchCapabilityTalk, "automation")
+	if err != nil {
+		return automation.DispatchResult{Err: err}
+	}
+
 	rt, err := d.arc.resolveSpawner(world)
 	if err != nil {
+		d.arc.recordAgentLaunchOutcome(ctx, admission, "post-launch", err)
 		return automation.DispatchResult{Err: fmt.Errorf("resolve runtime for world %s: %w", world.ID, err)}
 	}
 
@@ -152,11 +158,15 @@ func (d *AutomationDispatcher) Dispatch(ctx context.Context, req automation.Disp
 	})
 	output := captured.String()
 	if err != nil {
+		d.arc.recordAgentLaunchOutcome(ctx, admission, "post-launch", err)
 		return automation.DispatchResult{Output: output, Err: fmt.Errorf("exec runtime in world %s: %w", world.ID, err)}
 	}
 	if exitCode != 0 {
-		return automation.DispatchResult{Output: output, Err: fmt.Errorf("runtime exited with code %d", exitCode)}
+		err := fmt.Errorf("runtime exited with code %d", exitCode)
+		d.arc.recordAgentLaunchOutcome(ctx, admission, "post-launch", err)
+		return automation.DispatchResult{Output: output, Err: err}
 	}
+	d.arc.recordAgentLaunchOutcome(ctx, admission, "post-launch", nil)
 	return automation.DispatchResult{Output: output}
 }
 
@@ -368,4 +378,3 @@ func (a *Architect) NewAutomationEngine(cfg AutomationEngineConfig) (*automation
 	}
 	return eng, nil
 }
-

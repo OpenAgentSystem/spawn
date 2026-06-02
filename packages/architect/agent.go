@@ -29,8 +29,14 @@ func (a *Architect) SpawnAgent(ctx context.Context, worldID, agentName string) e
 		return fmt.Errorf("world %s is not running.\nStart a world first with 'spwn world'", worldID)
 	}
 
+	admission, err := a.authorizeAgentLaunch(ctx, u, agentName, launchCapabilityTalk, "interactive")
+	if err != nil {
+		return err
+	}
+
 	rt, err := a.resolveSpawner(u)
 	if err != nil {
+		a.recordAgentLaunchOutcome(ctx, admission, "post-launch", err)
 		return err
 	}
 
@@ -55,6 +61,7 @@ func (a *Architect) SpawnAgent(ctx context.Context, worldID, agentName string) e
 	})
 
 	duration := time.Since(startTime)
+	outcomeErr := err
 
 	// Save session + journal (best-effort) - both live in the agent's
 	// persistent home dir, addressed by name.
@@ -78,11 +85,15 @@ func (a *Architect) SpawnAgent(ctx context.Context, worldID, agentName string) e
 	}
 
 	if err != nil {
+		a.recordAgentLaunchOutcome(ctx, admission, "post-launch", err)
 		return fmt.Errorf("exec claude: %w", err)
 	}
 	if exitCode != 0 {
-		return fmt.Errorf("agent exited with code %d.\nCheck container logs with 'spwn logs %s' for details", exitCode, worldID)
+		outcomeErr = fmt.Errorf("agent exited with code %d.\nCheck container logs with 'spwn logs %s' for details", exitCode, worldID)
+		a.recordAgentLaunchOutcome(ctx, admission, "post-launch", outcomeErr)
+		return outcomeErr
 	}
+	a.recordAgentLaunchOutcome(ctx, admission, "post-launch", outcomeErr)
 	return nil
 }
 
@@ -104,8 +115,14 @@ func (a *Architect) SpawnAgentDetached(ctx context.Context, worldID, agentName s
 		return fmt.Errorf("world %s is not running.\nStart a world first with 'spwn world'", worldID)
 	}
 
+	admission, err := a.authorizeAgentLaunch(ctx, u, agentName, launchCapabilitySpawn, "detached")
+	if err != nil {
+		return err
+	}
+
 	rt, err := a.resolveSpawner(u)
 	if err != nil {
+		a.recordAgentLaunchOutcome(ctx, admission, "post-launch", err)
 		return err
 	}
 
@@ -129,15 +146,16 @@ func (a *Architect) SpawnAgentDetached(ctx context.Context, worldID, agentName s
 		log.Printf("warning: failed to save session: %v", saveErr)
 	}
 
-	return a.backend.ExecDetached(ctx, u.ContainerID, backend.ExecConfig{
+	err = a.backend.ExecDetached(ctx, u.ContainerID, backend.ExecConfig{
 		Cmd: cmd,
 		Env: env,
 		TTY: false,
 	})
+	a.recordAgentLaunchOutcome(ctx, admission, "post-launch", err)
+	return err
 }
 
 // agentEnv builds environment variables for agent execution inside containers.
 func agentEnv() []string {
 	return DockerEnvVars()
 }
-

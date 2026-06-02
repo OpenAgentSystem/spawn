@@ -24,8 +24,14 @@ func (a *Architect) SpawnNPC(ctx context.Context, worldID string, task string) e
 		return fmt.Errorf("world %s is not running.\nStart a world first with 'spwn world'", worldID)
 	}
 
+	admission, err := a.authorizeAgentLaunch(ctx, u, "npc", launchCapabilityTalk, "npc")
+	if err != nil {
+		return err
+	}
+
 	rt, err := a.resolveSpawner(u)
 	if err != nil {
+		a.recordAgentLaunchOutcome(ctx, admission, "post-launch", err)
 		return err
 	}
 
@@ -47,10 +53,14 @@ func (a *Architect) SpawnNPC(ctx context.Context, worldID string, task string) e
 	})
 
 	if err != nil {
+		a.recordAgentLaunchOutcome(ctx, admission, "post-launch", err)
 		return fmt.Errorf("exec NPC: %w", err)
 	}
 	if exitCode != 0 {
-		return fmt.Errorf("npc exited with code %d.\nCheck container logs with 'spwn logs %s' for details", exitCode, worldID)
+		err := fmt.Errorf("npc exited with code %d.\nCheck container logs with 'spwn logs %s' for details", exitCode, worldID)
+		a.recordAgentLaunchOutcome(ctx, admission, "post-launch", err)
+		return err
 	}
+	a.recordAgentLaunchOutcome(ctx, admission, "post-launch", nil)
 	return nil
 }
