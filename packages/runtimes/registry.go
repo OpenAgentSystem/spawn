@@ -24,6 +24,15 @@ func GetSpawner(name string) (Spawner, error) {
 	return s, nil
 }
 
+// GetSpawnerForDispatch returns the spawn-time adapter after applying
+// the Adapter Spec v1.0 ToS/legal-evidence gate for the dispatch.
+func GetSpawnerForDispatch(name string, policy DispatchPolicy) (Spawner, error) {
+	if err := AuthorizeDispatch(name, policy); err != nil {
+		return nil, err
+	}
+	return GetSpawner(name)
+}
+
 // AllSpawners returns every registered spawn-time adapter keyed by
 // runtime name. Callers must not mutate the returned map.
 func AllSpawners() map[string]Spawner {

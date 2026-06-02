@@ -46,6 +46,10 @@ type Adapter struct {
 	// credential sync, prelaunch shell, default configs). nil when
 	// the runtime is purely declarative.
 	Spawn Spawner
+
+	// Spec declares the OAS Agent Adapter Spec v1.0 metadata used to
+	// validate adapter registration and enforce pre-dispatch ToS gates.
+	Spec AdapterSpec
 }
 
 // all is the package-global list of registered adapters, populated
@@ -57,6 +61,9 @@ var all []Adapter
 // spawner registry; Render in the transpile registry). Typically
 // called once per runtime subpackage from init().
 func Register(a Adapter) {
+	if err := ValidateAdapterSpec(a); err != nil {
+		panic(err)
+	}
 	all = append(all, a)
 	if a.Spawn != nil {
 		RegisterSpawner(a.Spawn)
