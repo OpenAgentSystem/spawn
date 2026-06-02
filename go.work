@@ -17,6 +17,7 @@ use (
 	./packages/platform
 	./packages/project
 	./packages/runtimes
+	./packages/supplylayer
 	./packages/transpile
 	./packages/upgrade
 	./packages/world
