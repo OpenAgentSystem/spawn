@@ -1,0 +1,15 @@
+name: versioned-bot-stage-1-5pct
+description: W3-25 rollout demo — stage 1, 5% canary of v2 alongside v1 active.
+role: worker
+version: v1
+runtime:
+  backend: spwn:codex
+rollout:
+  v_active: v1
+  v_canary: v2
+  canary_percent: 5
+dependencies: []
+metadata:
+  wave: "3"
+  prompt: W3-25
+  stage: "1"
