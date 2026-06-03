@@ -1,0 +1,13 @@
+name: versioned-bot-stage-3-100pct
+description: W3-25 rollout demo — stage 3, v2 promoted to active; rollout complete.
+role: worker
+version: v2
+runtime:
+  backend: spwn:codex
+rollout:
+  v_active: v2
+dependencies: []
+metadata:
+  wave: "3"
+  prompt: W3-25
+  stage: "3"

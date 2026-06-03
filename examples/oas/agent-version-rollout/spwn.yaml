@@ -1,0 +1,21 @@
+name: agent-version-rollout
+worlds:
+  rollout-stage-1-5pct:
+    agents:
+      - versioned-bot-stage-1-5pct
+  rollout-stage-2-50pct:
+    agents:
+      - versioned-bot-stage-2-50pct
+  rollout-stage-3-100pct:
+    agents:
+      - versioned-bot-stage-3-100pct
+metadata:
+  wave: "3"
+  workstream: agent-platform
+  prompt: W3-25
+  parent_adr: Gridltd-DevOps/architecture-decisions#84
+  description: |
+    One agent (versioned-bot) migrating from v1 to v2 via a staged 5% -> 50% ->
+    100% canary rollout. Stage manifests live under
+    spwn/agents/versioned-bot/stage-*-*/agent.yaml; each stage is a different
+    point in time the operator would commit.
