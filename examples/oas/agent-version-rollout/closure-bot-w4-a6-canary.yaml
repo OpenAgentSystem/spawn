@@ -1,0 +1,65 @@
+name: closure-bot
+description: |
+  W4-A6 — real 5% v1->v2 canary for the production closure-bot agent.
+
+  Lowest-blast-radius first cohort entry layered on top of the W3-25 demo
+  fixture (`examples/oas/agent-version-rollout/spwn/agents/versioned-bot/`).
+  This manifest is the live operator commit that opens stage 1 of the v1->v2
+  migration for closure-bot in the wave3-production-agents world.
+
+  Promotion past 5% is out of scope for W4-A6 and must follow the go/no-go
+  criteria documented below.
+role: worker
+version: v1
+runtime:
+  backend: spwn:codex
+rollout:
+  v_active: v1
+  v_canary: v2
+  canary_percent: 5
+dependencies: []
+metadata:
+  wave: "4"
+  prompt: W4-A6
+  stage: "1"
+  cohort: real-canary
+  parent_fixture: examples/oas/agent-version-rollout/
+  parent_demo_test: TestW3_25_VersionedBotV1ToV2Migration
+  parent_prs:
+    - OpenAgentSystem/spawn#21
+    - OpenAgentSystem/spawn#23
+  closes_ref: OpenAgentSystem/spawn#22
+  adapter_spec_version: "1.0"
+  spawn_api_path: /v1/spawn/dispatch
+  legacy_direct_invoke: deprecated
+  repository: OpenAgentSystem/closure-bot
+  first_dispatch_utc: "2026-06-02T09:30:00Z"
+  canary_opened_utc: "2026-06-04T00:00:00Z"
+  lead: pluckhuang
+  # 24h go/no-go criteria — operator decision at 2026-06-05T00:00:00Z.
+  # Read via `architect.SideBySideSuccessRates` over the canary window.
+  #
+  # GO (promote to stage 2 / 50%):
+  #   - v2/canary success-rate within -1.0pp of v1/active success-rate;
+  #   - v2/canary p95 dispatch latency within +10% of v1/active;
+  #   - zero new error classes in Action Journal vs v1 baseline;
+  #   - canary cohort share observed in [3%, 7%] (within +/- 2pp of 5%);
+  #   - no SEV from #pluckhuang / on-call during the 24h window.
+  #
+  # NO-GO (revert manifest to single-line `version: v1`, clear rollout):
+  #   - any of the GO criteria fails, OR
+  #   - any p1 incident attributable to v2 cohort, OR
+  #   - canary success-rate trails v1/active by >1.0pp at any sampled hour
+  #     after the first hour of warm-up.
+  go_no_go:
+    decision_at_utc: "2026-06-05T00:00:00Z"
+    metric_source: architect.SideBySideSuccessRates
+    promote_to_stage_2_threshold:
+      success_rate_delta_pp_min: -1.0
+      latency_p95_delta_pct_max: 10
+      cohort_share_pct_min: 3
+      cohort_share_pct_max: 7
+      new_error_classes_max: 0
+    rollback_trigger:
+      any_p1_incident_attributable_to_v2: true
+      hourly_success_delta_pp_min_after_warmup: -1.0
