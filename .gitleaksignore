@@ -1,0 +1,6 @@
+# Per-finding suppressions for gitleaks. Format:
+#   <commit-sha>:<path>:<rule-id>:<line>
+# Keep empty until a justified suppression is needed. See
+# .gitleaks.toml's [allowlist] block for path-level allowlisting,
+# which is preferred for test-fixture files because it survives
+# rebases (no commit-SHA dependency).
