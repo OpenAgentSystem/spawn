@@ -1,6 +1,20 @@
 # Per-finding suppressions for gitleaks. Format:
 #   <commit-sha>:<path>:<rule-id>:<line>
-# Keep empty until a justified suppression is needed. See
-# .gitleaks.toml's [allowlist] block for path-level allowlisting,
+# See .gitleaks.toml's [allowlist] block for path-level allowlisting,
 # which is preferred for test-fixture files because it survives
 # rebases (no commit-SHA dependency).
+#
+# === Documented false positives ===
+#
+# docs/releasing.md (historical path; now docs/contributing/releasing.md)
+# line 45 documents the Tauri auto-updater minisign public-key format.
+# The string literally begins with `untrusted comment: minisign public
+# key:` — a *public* key shape, safe to commit by design (minisign's
+# threat model assumes pubkey is public). gitleaks' generic-api-key rule
+# flags it on entropy alone. Fingerprint uses the historical path
+# (docs/releasing.md) as recorded at commit time.
+#
+# Two historical commits introduce/modify this section; both suppressed
+# below. Verified 2026-06-04 against W4-17 (#736) backfill PR.
+febc9d430ee44f79671650845131062f1e32f9d5:docs/releasing.md:generic-api-key:45
+518bfc6b987f9f6ef4dbeb2754c1344d124351ea:docs/releasing.md:generic-api-key:45
