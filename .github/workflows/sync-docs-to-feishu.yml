@@ -1,0 +1,64 @@
+name: Sync docs/standard to Feishu Wiki
+
+# RFC #4925 — 9 大标准文档实时维护 + 自动同步到飞书。
+#
+# 单向同步:GitHub (Markdown 源) → Lark Wiki (only-read 镜像)。
+# 触发:push to develop/main 且 docs/standard/** 改动。
+# 配置:docs/standard/.feishu-sync.yml (mapping + space_id)
+# 密钥:LARK_APP_ID + LARK_APP_SECRET (org secrets);若未配置,workflow warn-only 不 fail
+#
+# Lark 端文档顶部自动加 banner 表明"直接编辑无效"。
+#
+# 本 workflow 是 source-only(不进 sync-github-repo / sync-org-rules),
+# 因为不同 repo 的 docs/standard/ 内容必须独立(per RFC)。
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - "docs/standard/**"
+      - ".github/workflows/sync-docs-to-feishu.yml"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print plan only, don't push to Lark"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-docs-to-feishu-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install --quiet pyyaml requests
+
+      - name: Sync docs/standard to Lark Wiki
+        env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPO_URL: https://github.com/${{ github.repository }}
+        run: |
+          if [ -z "${LARK_APP_ID:-}" ] || [ -z "${LARK_APP_SECRET:-}" ]; then
+            echo "::warning::LARK_APP_ID / LARK_APP_SECRET not set — skipping sync (configure org secrets to enable)"
+            exit 0
+          fi
+          python .github/workflows/scripts/feishu/sync_docs.py
