@@ -1,0 +1,50 @@
+# Feishu (Lark) sync configuration for docs/standard/ — spawn
+#
+# RFC:  OpenAgentSystem/AgentTeam#4925
+# Pilot:  OpenAgentSystem/AgentTeam#4926
+# Cohort: infra#637 · gateway#665 · mission-control#452
+
+space_id: ""
+
+banner: |
+  📌 此文档由 GitHub 自动同步,**直接编辑无效** — 改这里:
+  {{source_url}}
+
+  最后同步:{{sync_at}} · 源 commit:{{commit_sha_short}}
+
+mappings:
+  - file: README.md
+    title: "9 大标准文档 索引 — spawn"
+    node_id: ""
+
+  - file: 01-user-guide.md
+    title: "01 用户使用指南 — spawn"
+    node_id: ""
+  - file: 02-power-user.md
+    title: "02 进阶用户技巧 — spawn"
+    node_id: ""
+  - file: 03-faq-troubleshooting.md
+    title: "03 FAQ & 故障排查 — spawn"
+    node_id: ""
+  - file: 04-ops-runbook.md
+    title: "04 运维管理员手册 — spawn"
+    node_id: ""
+  - file: 05-high-concurrency-batch.md
+    title: "05 高并发批量指南 — spawn"
+    node_id: ""
+  - file: 06-developer-integration-release.md
+    title: "06 开发者集成 & 发版 — spawn"
+    node_id: ""
+  - file: 07-finops-reconciliation.md
+    title: "07 物料成本对账 FinOps — spawn"
+    node_id: ""
+  - file: 08-sales-playbook.md
+    title: "08 销售作战手册 — spawn"
+    node_id: ""
+  - file: 09-dependency-governance.md
+    title: "09 第三方依赖治理 — spawn"
+    node_id: ""
+
+  - file: 06a-skill-marketplace.md
+    title: "06a Skill marketplace / plugin ecosystem"
+    node_id: ""

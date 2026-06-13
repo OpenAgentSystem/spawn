@@ -1,0 +1,46 @@
+name: Check standard docs freshness
+
+# RFC #4925 — 9 大标准文档 frontmatter `last_reviewed` 必须 <= 180 天。
+# 90+ 天 warn,180+ 天 fail。
+# 项目可扩展额外文档(同目录,前缀 NN[a-z]-*.md),同规则。
+
+on:
+  pull_request:
+    paths:
+      - "docs/standard/**.md"
+      - ".github/workflows/check-standard-docs-freshness.yml"
+  schedule:
+    # 每周一 09:00 UTC scan develop tip,有 stale 文档发 issue
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: check-standard-docs-freshness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install --quiet pyyaml
+
+      - name: Check freshness
+        id: check
+        env:
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+        run: |
+          python .github/workflows/scripts/feishu/check_freshness.py
