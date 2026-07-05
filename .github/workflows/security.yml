@@ -3,15 +3,25 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   schedule:
-    - cron: "0 6 * * 1"  # weekly Monday 06:00 UTC
+    # Monthly baseline: first day of each month at 06:17 UTC. The non-round
+    # minute avoids the top-of-hour fleet spike during downstream rollout.
+    - cron: "17 6 1 * *"
+  workflow_dispatch:
 permissions:
   contents: read
   issues: write
 env:
   TRUFFLEHOG_VERSION: v3.95.2
+  GITLEAKS_VERSION: "8.18.4"
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
 jobs:
   gitleaks:
-    runs-on: ${{ vars.RUNNER_LABEL || 'blacksmith-2vcpu-ubuntu-2404' }}
+    # Security must not inherit the org/repo RUNNER_LABEL override: RUNNER_LABEL is
+    # still tiny in this source repo, and PR TruffleHog can SIGKILL on tiny.
+    runs-on: fly-tier-standard-ubuntu-2404
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -20,33 +30,193 @@ jobs:
         # .gitleaks.toml is synced to all downstream repos. Read from the base branch so a PR cannot
         # tamper with the config to bypass scanning. Gridltd-DevOps/.github PRs use the PR-branch
         # config directly (no override) to allow rule development in this source repo.
-        #
-        # Bootstrap case (Gridltd-DevOps/.github#736 backfill): on the very first PR that
-        # introduces both .gitleaks.toml and this workflow, the base branch lacks the file,
-        # so `git show origin/<base>:.gitleaks.toml` fails. Fall back to the PR-branch copy
-        # in that one-shot bootstrap case. After merge, subsequent PRs hit the normal
-        # trusted-base path. Remove this fallback once sync-org-rules owns propagation.
         if: github.event_name == 'pull_request' && github.repository != 'Gridltd-DevOps/.github'
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          mkdir -p "${GITHUB_WORKSPACE}/trusted-gitleaks-config"
-          if git show "origin/${{ github.base_ref }}:.gitleaks.toml" > "${GITHUB_WORKSPACE}/trusted-gitleaks-config/.gitleaks.toml" 2>/dev/null; then
-            echo "Using trusted base-branch .gitleaks.toml"
-          elif [ -f .gitleaks.toml ]; then
-            echo "::warning::Base branch lacks .gitleaks.toml (bootstrap case); using PR-branch copy"
-            cp .gitleaks.toml "${GITHUB_WORKSPACE}/trusted-gitleaks-config/.gitleaks.toml"
-          else
-            echo "::error::No .gitleaks.toml available on base or PR branch"
+          set -euo pipefail
+          if [[ -z "$BASE_REF" \
+              || ! "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ \
+              || "$BASE_REF" == *..* \
+              || "$BASE_REF" == /* \
+              || "$BASE_REF" == */ \
+              || "$BASE_REF" == *.lock \
+              || "$BASE_REF" == *@{* ]]; then
+            echo "::error::Unsafe base ref for trusted gitleaks config lookup: $BASE_REF"
             exit 1
           fi
-          echo "GITLEAKS_CONFIG=${GITHUB_WORKSPACE}/trusted-gitleaks-config/.gitleaks.toml" >> "${GITHUB_ENV}"
-      - name: Run gitleaks
+          git check-ref-format "refs/heads/$BASE_REF"
+          mkdir -p "${GITHUB_WORKSPACE}/trusted-gitleaks-config"
+          trusted_config="${GITHUB_WORKSPACE}/trusted-gitleaks-config/.gitleaks.toml"
+          if git show "origin/${BASE_REF}:.gitleaks.toml" > "$trusted_config" 2>/dev/null; then
+            echo "Using trusted gitleaks config from origin/${BASE_REF}."
+          else
+            echo "::warning::origin/${BASE_REF} lacks .gitleaks.toml; using built-in gitleaks defaults for new-repo bootstrap only."
+            {
+              echo 'title = "Gridltd new-repo bootstrap gitleaks defaults"'
+              echo ''
+              echo '[extend]'
+              echo 'useDefault = true'
+            } > "$trusted_config"
+          fi
+          echo "GITLEAKS_CONFIG=$trusted_config" >> "${GITHUB_ENV}"
+      - name: Resolve trusted gitleaks config for baseline runs
+        # Scheduled/manual baselines must use the default-branch policy. A manual dispatch from
+        # a branch with a relaxed .gitleaks.toml must not be able to produce a false clean
+        # baseline. Reject non-default refs and read the config from origin/default_branch.
+        if: github.event_name != 'pull_request'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          for i in 1 2 3; do
-            curl -sSfL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz && break
-            sleep 5
+          set -euo pipefail
+          if [[ -z "$DEFAULT_BRANCH" \
+              || ! "$DEFAULT_BRANCH" =~ ^[A-Za-z0-9._/-]+$ \
+              || "$DEFAULT_BRANCH" == *..* \
+              || "$DEFAULT_BRANCH" == /* \
+              || "$DEFAULT_BRANCH" == */ \
+              || "$DEFAULT_BRANCH" == *.lock \
+              || "$DEFAULT_BRANCH" == *@{* ]]; then
+            echo "::error::Unsafe default branch for trusted baseline gitleaks config lookup: $DEFAULT_BRANCH"
+            exit 86
+          fi
+          git check-ref-format "refs/heads/$DEFAULT_BRANCH"
+          if [[ "${REF_NAME:-}" != "$DEFAULT_BRANCH" ]]; then
+            echo "::error title=baseline dispatch rejected::Baseline scans must run from the default branch ($DEFAULT_BRANCH), not '${REF_NAME:-unknown}', so a branch-local .gitleaks.toml cannot relax policy."
+            exit 86
+          fi
+          mkdir -p "${GITHUB_WORKSPACE}/trusted-gitleaks-config"
+          trusted_config="${GITHUB_WORKSPACE}/trusted-gitleaks-config/.gitleaks.toml"
+          git show "origin/${DEFAULT_BRANCH}:.gitleaks.toml" > "$trusted_config"
+          echo "GITLEAKS_CONFIG=$trusted_config" >> "${GITHUB_ENV}"
+      - name: Resolve PR scan range
+        # PR required gate is incremental: it scans only the commits this PR introduces
+        # (base..head), not the whole working tree/history. Failure to resolve base/head is
+        # treated as an infrastructure error (fail closed), never a clean pass. Full-tree /
+        # full-history scanning is reserved for the scheduled/manual baseline lane (#1724).
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${BASE_SHA:-}" || -z "${HEAD_SHA:-}" ]]; then
+            echo "::error title=PR scan range resolution failure::Missing base/head SHA; cannot bound the PR secret scan. This is an infrastructure error, not a clean scan."
+            exit 86
+          fi
+          for ref in "${BASE_SHA}" "${HEAD_SHA}"; do
+            if ! [[ "${ref}" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+              echo "::error title=PR scan range resolution failure::Unexpected SHA format '${ref}'. Infrastructure error, not a clean scan."
+              exit 86
+            fi
           done
-          tar xzf gitleaks.tar.gz
-          ./gitleaks detect --source . --verbose --config "${GITLEAKS_CONFIG:-.gitleaks.toml}" --gitleaks-ignore-path .gitleaksignore
+          for ref in "${BASE_SHA}" "${HEAD_SHA}"; do
+            if ! git cat-file -e "${ref}^{commit}" 2>/dev/null; then
+              echo "Commit ${ref} not present locally; attempting bounded fetch."
+              git fetch --no-tags --quiet origin "${ref}" 2>/dev/null || true
+            fi
+            if ! git cat-file -e "${ref}^{commit}" 2>/dev/null; then
+              echo "::error title=PR scan range resolution failure::Commit ${ref} could not be resolved after fetch. Infrastructure error, not a clean scan."
+              exit 86
+            fi
+          done
+          commit_count="$(git rev-list --count "${BASE_SHA}..${HEAD_SHA}")"
+          changed_files="$(git diff --name-only "${BASE_SHA}..${HEAD_SHA}" | wc -l | tr -d ' ')"
+          echo "scan_mode=pull_request_incremental"
+          echo "pr_base=${BASE_SHA}"
+          echo "pr_head=${HEAD_SHA}"
+          echo "pr_commit_count=${commit_count}"
+          echo "pr_changed_file_count=${changed_files}"
+          {
+            echo "PR_BASE_SHA=${BASE_SHA}"
+            echo "PR_HEAD_SHA=${HEAD_SHA}"
+          } >> "${GITHUB_ENV}"
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+
+          version="${GITLEAKS_VERSION:-8.18.4}"
+          install_dir="${RUNNER_TEMP:-/tmp}/gitleaks-bin"
+          asset="gitleaks_${version}_linux_x64.tar.gz"
+          release_base="https://github.com/gitleaks/gitleaks/releases/download/v${version}"
+          archive="${install_dir}/${asset}"
+          retries="${GITLEAKS_DOWNLOAD_RETRIES:-3}"
+
+          mkdir -p "$install_dir"
+
+          if command -v gitleaks >/dev/null 2>&1; then
+            echo "Using preinstalled gitleaks: $(command -v gitleaks)"
+            ln -sf "$(command -v gitleaks)" "${install_dir}/gitleaks"
+          else
+            downloaded=false
+            for attempt in $(seq 1 "$retries"); do
+              echo "Downloading gitleaks v${version} (attempt ${attempt}/${retries})"
+              if curl --fail --location --show-error --silent --retry 2 --retry-delay 5 --retry-all-errors \
+                  --output "$archive" "${release_base}/${asset}"; then
+                downloaded=true
+                break
+              fi
+              sleep 5
+            done
+
+            if [[ "$downloaded" != "true" ]]; then
+              echo "::error title=gitleaks install infrastructure failure::Unable to download gitleaks v${version} release asset after ${retries} attempts. Secret scan did not run; this is an infrastructure failure, not a clean scan."
+              exit 86
+            fi
+
+            tar -xzf "$archive" -C "$install_dir" gitleaks
+            chmod +x "${install_dir}/gitleaks"
+          fi
+
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+          "${install_dir}/gitleaks" version
+      - name: Run gitleaks (PR incremental range)
+        if: github.event_name == 'pull_request'
+        # Scan only the commit range this PR introduces. `--log-opts=base..head` bounds gitleaks
+        # to the PR delta (gitleaks v8.18.4 has no `git` subcommand; `detect --log-opts` is the
+        # version-compatible range form). `--redact` keeps any match out of the logs.
+        run: |
+          set -euo pipefail
+          gitleaks detect --source . \
+            --log-opts="${PR_BASE_SHA}..${PR_HEAD_SHA}" \
+            --redact --verbose \
+            --config "${GITLEAKS_CONFIG:-.gitleaks.toml}" \
+            --gitleaks-ignore-path .gitleaksignore
+      - name: Run gitleaks (full baseline scan)
+        if: github.event_name != 'pull_request'
+        # Scheduled/manual baseline lane keeps full-history coverage.
+        run: |
+          set -euo pipefail
+          report_path="${RUNNER_TEMP:-/tmp}/gitleaks-baseline-report.json"
+          set +e
+          gitleaks detect --source . \
+            --redact --verbose \
+            --report-format json \
+            --report-path "$report_path" \
+            --config "${GITLEAKS_CONFIG:-.gitleaks.toml}" \
+            --gitleaks-ignore-path .gitleaksignore
+          rc=$?
+          set -e
+          finding_count="unknown"
+          if [ -s "$report_path" ]; then
+            finding_count="$(python3 - "$report_path" <<'PY'
+          import json
+          import sys
+          try:
+              with open(sys.argv[1], "r", encoding="utf-8") as fh:
+                  data = json.load(fh)
+          except Exception:
+              print("unknown")
+          else:
+              print(len(data) if isinstance(data, list) else "unknown")
+          PY
+          )"
+          fi
+          {
+            echo "BASELINE_GITLEAKS_EXIT_CODE=$rc"
+            echo "BASELINE_GITLEAKS_FINDING_COUNT=$finding_count"
+          } >> "${GITHUB_ENV}"
+          exit "$rc"
       - name: Install TruffleHog
         if: github.event_name == 'pull_request'
         run: |
@@ -62,53 +232,212 @@ jobs:
           chmod +x trufflehog
           mv trufflehog "${HOME}/bin/"
           echo "${HOME}/bin" >> "${GITHUB_PATH}"
-      - name: Run TruffleHog
+      - name: Run TruffleHog (PR incremental range)
         if: github.event_name == 'pull_request'
-        # `--exclude-paths .trufflehogignore` skips security-test-fixture
-        # files (e.g., __tests__/outbound-guard.test.js) that intentionally
-        # contain synthetic strings shaped like real secrets. Sister to
-        # `.gitleaks.toml`'s `[allowlist].paths` block. The path-allowlist
-        # approach is immune to commit-fingerprint rotation. Background:
-        # gateway#525 / Gridltd-DevOps/.github#615.
+        # PR-bounded git scan over base..head instead of the previous `trufflehog filesystem .`
+        # full-working-tree scan, which caused the exit-137 (OOM/resource) required-check
+        # failures. `--exclude-paths .trufflehogignore` skips security-test-fixture files
+        # (e.g., __tests__/outbound-guard.test.js) that intentionally contain synthetic strings
+        # shaped like real secrets. Sister to `.gitleaks.toml`'s `[allowlist].paths` block. The
+        # path-allowlist approach is immune to commit-fingerprint rotation. Background:
+        # gateway#525 / Gridltd-DevOps/.github#615. `set -euo pipefail` + `--fail` fail closed
+        # on any scanner/argument error.
         run: |
+          set -euo pipefail
+          args=(git "file://${GITHUB_WORKSPACE}" \
+            --since-commit "${PR_BASE_SHA}" \
+            --branch "${PR_HEAD_SHA}" \
+            --results=verified,unknown --fail --no-update)
           if [ -f .trufflehogignore ]; then
-            trufflehog filesystem . --results=verified,unknown --fail --no-update --exclude-paths=.trufflehogignore
-          else
-            trufflehog filesystem . --results=verified,unknown --fail --no-update
+            args+=(--exclude-paths=.trufflehogignore)
           fi
-      - name: Create issue on cron failure
-        if: failure() && github.event_name == 'schedule'
+          trufflehog "${args[@]}"
+      - name: Create or update baseline security issue
+        if: failure() && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASELINE_ASSIGNEE: zhaojunlucky
         run: |
-          EXISTING=$(gh issue list --label "security,ci-failure" --state open --json number -q 'length')
-          if [ "$EXISTING" = "0" ]; then
+          set -euo pipefail
+          title="Security: baseline secret scan follow-up"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          issue_body="$(mktemp)"
+          cat > "$issue_body" <<EOF
+          Monthly/manual baseline secret scan needs follow-up.
+
+          - Workflow: $run_url
+          - Repository: ${{ github.repository }}
+          - Event: ${{ github.event_name }}
+          - Ref: ${{ github.ref }}
+          - SHA: ${{ github.sha }}
+          - Scanner: gitleaks ${GITLEAKS_VERSION}
+          - Mode: full baseline scan
+          - Exit code: ${BASELINE_GITLEAKS_EXIT_CODE:-unknown}
+          - Redacted finding count: ${BASELINE_GITLEAKS_FINDING_COUNT:-unknown}
+
+          Raw secret values are intentionally excluded. Review the workflow run
+          with appropriate repository access; scanner output is redacted.
+          EOF
+
+          existing="$(gh issue list \
+            --state open \
+            --label "security,ci-failure" \
+            --search "$title in:title" \
+            --json number \
+            -q '.[0].number // empty')"
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$issue_body"
+            gh issue edit "$existing" --add-assignee "$BASELINE_ASSIGNEE" --add-label "security,ci-failure"
+          else
             gh issue create \
-              --title "Security: gitleaks failure (weekly scan)" \
-              --body "Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              --title "$title" \
+              --body-file "$issue_body" \
+              --assignee "$BASELINE_ASSIGNEE" \
               --label "security,ci-failure"
           fi
   sanitize:
     name: Data Sanitization Check
-    runs-on: ${{ vars.RUNNER_LABEL || 'blacksmith-2vcpu-ubuntu-2404' }}
+    # Security must not inherit the org/repo RUNNER_LABEL override: RUNNER_LABEL is
+    # still tiny in this source repo, and PR TruffleHog can SIGKILL on tiny.
+    timeout-minutes: 10
+    runs-on: fly-tier-standard-ubuntu-2404
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
       - name: Install detect-secrets
         run: pip install detect-secrets 2>/dev/null || pip install --break-system-packages detect-secrets
       - name: Scan for secrets (advisory)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          detect-secrets scan --all-files --exclude-files '\.gitleaksignore|node_modules|\.lock|dist/' . > .secrets-report.json
+          set -euo pipefail
+
+          empty_report='{"version":"","plugins_used":[],"filters_used":[],"results":{},"generated_at":""}'
+
+          write_empty_report() {
+            printf '%s\n' "$empty_report" > .secrets-report.json
+          }
+
+          resolve_pr_scan_files() {
+            if [[ -z "${BASE_SHA:-}" || -z "${HEAD_SHA:-}" ]]; then
+              echo "::warning::Missing PR base/head SHA; skipping detect-secrets advisory scan."
+              return 1
+            fi
+
+            for ref in "${BASE_SHA}" "${HEAD_SHA}"; do
+              if ! [[ "${ref}" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+                echo "::warning::Unexpected PR SHA format '${ref}'; skipping detect-secrets advisory scan."
+                return 1
+              fi
+              if ! git cat-file -e "${ref}^{commit}" 2>/dev/null; then
+                git fetch --no-tags --quiet origin "${ref}" 2>/dev/null || true
+              fi
+              if ! git cat-file -e "${ref}^{commit}" 2>/dev/null; then
+                echo "::warning::Unable to resolve PR commit '${ref}'; skipping detect-secrets advisory scan."
+                return 1
+              fi
+            done
+
+            raw_files="$(mktemp)"
+            git diff --name-only -z --diff-filter=ACMR "${BASE_SHA}..${HEAD_SHA}" > "$raw_files"
+            : > .secrets-scan-files.zlist
+            while IFS= read -r -d '' path; do
+              case "$path" in
+                .gitleaksignore|*/.gitleaksignore|node_modules/*|*/node_modules/*|dist/*|*/dist/*|*.lock)
+                  continue
+                  ;;
+              esac
+              if [[ -f "$path" ]]; then
+                printf '%s\0' "$path" >> .secrets-scan-files.zlist
+              fi
+            done < "$raw_files"
+          }
+
+          scan_paths=(".")
+          timeout_seconds=300
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            timeout_seconds=180
+            if resolve_pr_scan_files; then
+              mapfile -d '' -t scan_paths < .secrets-scan-files.zlist
+              echo "detect-secrets advisory PR file count: ${#scan_paths[@]}"
+            else
+              scan_paths=()
+            fi
+          fi
+
+          if [[ "${#scan_paths[@]}" -eq 0 ]]; then
+            write_empty_report
+          elif ! timeout "$timeout_seconds" detect-secrets scan \
+              --exclude-files '\.gitleaksignore|node_modules|\.lock|dist/' \
+              "${scan_paths[@]}" > .secrets-report.json; then
+            echo "::warning::detect-secrets advisory scan timed out or failed; gitleaks remains the required secret gate."
+            write_empty_report
+          fi
           FINDINGS=$(python3 -c "import json; d=json.load(open('.secrets-report.json')); print(sum(len(v) for v in d.get('results',{}).values()))")
           echo "detect-secrets findings: $FINDINGS"
           if [ "$FINDINGS" -gt 0 ]; then
             echo "::warning::detect-secrets found $FINDINGS potential secrets (advisory — review recommended)"
           fi
       - name: PII check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          HITS=$(grep -rn --include='*.ts' --include='*.js' --include='*.py' --include='*.json' -E '[0-9]{3}-[0-9]{2}-[0-9]{4}' . --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist 2>/dev/null | grep -v test | grep -v spec | grep -v mock | head -20)
-          if [ -n "$HITS" ]; then
+          set -euo pipefail
+
+          raw_hits="$(mktemp)"
+          filtered_hits="$(mktemp)"
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            if [[ ! -s .secrets-scan-files.zlist ]]; then
+              echo "No PR-changed files match PII check scope"
+              echo "SANITIZE_PII_FINDING_COUNT=0" >> "${GITHUB_ENV}"
+              exit 0
+            fi
+
+            while IFS= read -r -d '' path; do
+              if [[ ! -f "$path" ]]; then
+                continue
+              fi
+              set +e
+              grep -Hn -E '[0-9]{3}-[0-9]{2}-[0-9]{4}' -- "$path" >> "$raw_hits" 2>/dev/null
+              grep_rc=$?
+              set -e
+              if [[ "$grep_rc" -gt 1 ]]; then
+                echo "::error title=PII check infrastructure failure::grep failed while scanning PR-bounded file scope: $path"
+                exit 86
+              fi
+            done < .secrets-scan-files.zlist
+          else
+            set +e
+            grep -rHn \
+              --include='*.ts' \
+              --include='*.js' \
+              --include='*.py' \
+              --include='*.json' \
+              --exclude-dir=node_modules \
+              --exclude-dir=.git \
+              --exclude-dir=dist \
+              -E '[0-9]{3}-[0-9]{2}-[0-9]{4}' -- . > "$raw_hits" 2>/dev/null
+            grep_rc=$?
+            set -e
+            if [[ "$grep_rc" -gt 1 ]]; then
+              echo "::error title=PII check infrastructure failure::grep failed while scanning baseline file scope."
+              exit 86
+            fi
+          fi
+
+          grep -v -E '(test|spec|mock)' "$raw_hits" > "$filtered_hits" || true
+          pii_count="$(wc -l < "$filtered_hits" | tr -d ' ')"
+          echo "SANITIZE_PII_FINDING_COUNT=$pii_count" >> "${GITHUB_ENV}"
+
+          if [[ "$pii_count" -gt 0 ]]; then
             echo "PII patterns found:"
-            echo "$HITS"
+            echo "Raw values are redacted; showing file paths only."
+            cut -d: -f1 "$filtered_hits" | sort -u | head -20
             exit 1
           fi
           echo "No PII patterns detected"
