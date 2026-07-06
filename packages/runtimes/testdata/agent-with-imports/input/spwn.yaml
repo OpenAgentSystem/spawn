@@ -1,0 +1,7 @@
+version: 1
+name: importy
+worlds:
+  home:
+    agents: [neo]
+    workspaces: [.]
+    knowledge: ./knowledge

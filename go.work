@@ -1,0 +1,26 @@
+go 1.25.0
+
+use (
+	./apps/api
+	./apps/cli
+	./apps/gate
+	./packages/activity
+	./packages/agent
+	./packages/agentplatform
+	./packages/architect
+	./packages/auth
+	./packages/automation
+	./packages/compile
+	./packages/container
+	./packages/dependency
+	./packages/gate
+	./packages/migration
+	./packages/platform
+	./packages/project
+	./packages/runtimes
+	./packages/supplylayer
+	./packages/transpile
+	./packages/upgrade
+	./packages/world
+	./tests/_catalog
+)

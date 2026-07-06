@@ -1,0 +1,7 @@
+version: 1
+name: nested-skills
+worlds:
+  home:
+    agents: [neo]
+    workspaces: [.]
+    knowledge: ./knowledge

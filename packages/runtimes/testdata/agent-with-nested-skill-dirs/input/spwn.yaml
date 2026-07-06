@@ -1,0 +1,7 @@
+version: 1
+name: nested
+worlds:
+  home:
+    agents: [neo]
+    workspaces: [.]
+    knowledge: ./knowledge

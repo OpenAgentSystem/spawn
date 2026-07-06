@@ -1,0 +1,38 @@
+package agent
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+	"spwn.sh/apps/cli/ui"
+	"spwn.sh/packages/agent"
+)
+
+func init() {
+	Cmd.AddCommand(sleepCmd)
+}
+
+var sleepCmd = &cobra.Command{
+	Use:   "sleep <agent-name>",
+	Short: "Consolidate experience - archive stale files, prune old sessions",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		name := args[0]
+		s := ui.New()
+
+		s.Blank()
+		s.Start(fmt.Sprintf("Sleep cycle for agent %q...", name))
+
+		result, err := agent.Sleep(name)
+		if err != nil {
+			return s.FailHint("Sleep failed", err,
+				fmt.Sprintf("Check that agent %q exists with \"spwn agent inspect %s\"", name, name))
+		}
+
+		s.Done("Archived playbooks", fmt.Sprintf("%d", result.ArchivedPlaybooks))
+		s.Done("Pruned sessions", fmt.Sprintf("%d", result.PrunedSessions))
+		s.Blank()
+
+		return nil
+	},
+}

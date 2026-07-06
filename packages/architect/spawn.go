@@ -1,0 +1,735 @@
+package architect
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"spwn.sh/packages/agent"
+	"spwn.sh/packages/dependency"
+	runtimes "spwn.sh/packages/runtimes"
+
+	"spwn.sh/packages/activity"
+	"spwn.sh/packages/architect/internal/deploy"
+	"spwn.sh/packages/auth"
+	authgh "spwn.sh/packages/auth/gh"
+	ib "spwn.sh/packages/compile"
+	ibbase "spwn.sh/packages/compile/base"
+	"spwn.sh/packages/container/backend"
+	"spwn.sh/packages/dependency/resolver"
+	"spwn.sh/packages/gate"
+	"spwn.sh/packages/platform"
+	"spwn.sh/packages/transpile"
+	"spwn.sh/packages/world/labels"
+	"spwn.sh/packages/world/models"
+)
+
+// buildPolicyMap converts the world's per-tool allow/deny config
+// (already merged across agents by the project resolver) into the
+// compile package's typed shape. The compile layer cannot import
+// world/models (would cycle) so we re-pack here at the boundary.
+func buildPolicyMap(in map[string]models.DepPolicy) map[string]ib.ToolPolicy {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]ib.ToolPolicy, len(in))
+	for k, v := range in {
+		out[k] = ib.ToolPolicy{Allow: v.Allow, Deny: v.Deny}
+	}
+	return out
+}
+
+// SpawnResult is returned by Spawn with the world and any non-fatal warnings.
+type SpawnResult struct {
+	World    *models.World
+	Warnings []string
+}
+
+// SpawnOpts configures world creation.
+type SpawnOpts struct {
+	ConfigName   string
+	Name         string // Optional user-facing display name.
+	AgentName    string
+	Workspaces   []models.Workspace
+	Manifest     models.Manifest
+	Image        string                     // Override base image (used for testing). Defaults to platform.WorldImage.
+	OnProgress   func(event, detail string) // Optional callback at each milestone.
+	LogWriter    io.Writer                  // Receives Docker build output. nil defaults to io.Discard.
+	Agents       []AgentSpec                // Multi-agent list (alternative to single AgentName).
+	IsArchitect  bool                       // When true, mounts Docker socket + SPWN_HOME for Architect mode.
+	ForceRebuild bool                       // When true, bypass the content-addressed image cache.
+	// RuntimeName selects the runtime adapter that drives spawn-time
+	// behavior (BuildCommand, credential sync, prelaunch shell) and
+	// the transpile target. Short form: "claude-code", "codex".
+	// Empty defaults to "claude-code" — the historical behavior and
+	// the only runtime with a Renderer today.
+	RuntimeName string
+	// Knowledge is an absolute host path to bind into /world/knowledge/.
+	// When empty, no bind mount is performed and the compile step is
+	// told no knowledge base exists (so the agent's system prompt
+	// never mentions /world/knowledge/). The CLI resolves any
+	// project-relative path to absolute before calling Spawn.
+	Knowledge string
+}
+
+// runtimeName returns opts.RuntimeName with the default-runtime
+// fallback. Keeps callers and tests that don't populate the field
+// working on the legacy default. Shares the same constant used by
+// the per-world resolver (see runtime_route.go) so the "what does
+// empty mean" question has exactly one answer in the package.
+func (opts *SpawnOpts) runtimeName() string {
+	if opts.RuntimeName != "" {
+		return opts.RuntimeName
+	}
+	return defaultRuntimeName
+}
+
+// Validate returns a non-nil error when SpawnOpts is missing
+// required fields or has an internally inconsistent combination.
+// Called at the top of Spawn before any side-effectful work.
+//
+// Agent-less spawns are legitimate: a world can be created first
+// and the agent attached later via SpawnAgent / SpawnAgentDetached.
+// The e2e suite exercises this path via the NoAgent() builder.
+func (opts *SpawnOpts) Validate() error {
+	if opts.ConfigName == "" {
+		return fmt.Errorf("SpawnOpts.ConfigName is required")
+	}
+	return nil
+}
+
+func (opts *SpawnOpts) progress(event, detail string) {
+	if opts.OnProgress != nil {
+		opts.OnProgress(event, detail)
+	}
+}
+
+func (opts *SpawnOpts) logWriter() io.Writer {
+	if opts.LogWriter != nil {
+		return opts.LogWriter
+	}
+	return io.Discard
+}
+
+// firstWriteNotifier forwards writes to an inner writer and calls
+// `once` exactly once on the first non-empty write. Used to
+// lift "the build is actually running now" out of the Docker
+// stream: the first byte arriving from `docker build` is the
+// signal that the cache was missed and a real build started. No
+// bytes ever arrive on a pure cache hit, so `once` never fires
+// and the UI stays on "Resolving compile...".
+type firstWriteNotifier struct {
+	inner io.Writer
+	once  func()
+	fired bool
+}
+
+func (w *firstWriteNotifier) Write(p []byte) (int, error) {
+	if !w.fired && len(p) > 0 {
+		w.fired = true
+		if w.once != nil {
+			w.once()
+		}
+	}
+	return w.inner.Write(p)
+}
+
+// Spawn creates a new world.
+func (a *Architect) Spawn(ctx context.Context, opts SpawnOpts) (*SpawnResult, error) {
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
+	var warnings []string
+
+	// Lifecycle hooks (`hook:pre-spawn` and friends) were retired
+	// alongside the old `/world/skills/` pipeline. Runtime hooks
+	// (Claude Code / Codex PreToolUse + UserPromptSubmit + …) are
+	// now declared per-file in spwn/hooks/<name>.yaml and selected per
+	// `.claude/settings.json` / `.codex/hooks.json` by the transpile
+	// layer — they run inside the container, not on the host.
+
+	// Generate ID
+	id := platform.GenerateWorldID(opts.ConfigName)
+
+	// Resolve each workspace to absolute path and validate it exists.
+	// Layout inside the container:
+	//   - 0 workspaces (ephemeral): no mounts, container uses its image's /workspace dir.
+	//   - 1+ workspaces: each mounted at /workspaces/<name>. The first is also
+	//     mounted at /workspace for legacy tools that expect a single root.
+	resolvedWorkspaces := make([]models.Workspace, 0, len(opts.Workspaces))
+	seenNames := map[string]bool{}
+	for i, ws := range opts.Workspaces {
+		abs, absErr := filepath.Abs(ws.Path)
+		if absErr != nil {
+			return nil, fmt.Errorf("resolve workspace %q: %w", ws.Path, absErr)
+		}
+		if _, statErr := os.Stat(abs); statErr != nil {
+			return nil, fmt.Errorf("workspace %s not found.\nCheck the path exists and is accessible", abs)
+		}
+		name := strings.TrimSpace(ws.Name)
+		if name == "" {
+			name = fmt.Sprintf("w%d", i)
+		}
+		if seenNames[name] {
+			return nil, fmt.Errorf("duplicate workspace name %q", name)
+		}
+		seenNames[name] = true
+		resolvedWorkspaces = append(resolvedWorkspaces, models.Workspace{Name: name, Path: abs, ReadOnly: ws.ReadOnly})
+	}
+
+	// Build mounts.
+	binds := buildWorkspaceBinds(resolvedWorkspaces)
+	var groupAdd []string
+
+	// Architect mode: mount Docker socket + SPWN state directory
+	if opts.IsArchitect {
+		binds = append(binds, "/var/run/docker.sock:/var/run/docker.sock")
+		binds = append(binds, platform.BaseDir()+":/home/spwn/.spwn")
+	}
+
+	// (role:chief / DooD chief-mode plumbing was here. Removed
+	// 2026-05-03 — chief-style multi-agent orchestration now lives
+	// in the gate via the spwn:dispatch tool: chiefs are normal
+	// agents that call dispatch over MCP, the gate runs `spwn agent
+	// talk` host-side. See packages/gate/lifecycle.go for the
+	// gate-level mounts that replaced this.)
+
+	// No /agents bind mount under the new architecture. Each
+	// agent's home directory is copied INTO the container at
+	// /agents/<name>/ by deploy.SyncIn() right after container
+	// start. On graceful shutdown (Destroy), deploy.SyncOut()
+	// copies the allowlisted memory directories back. Dotfiles,
+	// npm cache, .claude/*, etc. stay inside the container and die
+	// with it — the host project tree is never written to by a
+	// container process.
+
+	// Validate each named agent's mind directory and profile. We
+	// still need to check that every agent's tree exists on the
+	// host because we're about to copy it into the container.
+	agentNamesToValidate := []string{}
+	if len(opts.Agents) > 0 {
+		for _, spec := range opts.Agents {
+			agentNamesToValidate = append(agentNamesToValidate, spec.Name)
+		}
+	} else if opts.AgentName != "" {
+		agentNamesToValidate = append(agentNamesToValidate, opts.AgentName)
+	}
+	agentRollouts := make(map[string]RolloutDecision, len(agentNamesToValidate))
+	for _, name := range agentNamesToValidate {
+		if err := agent.ValidateMind(name); err != nil {
+			return nil, err
+		}
+		opts.progress("mind_validated", name)
+		// Parse agent.yaml (optional). Used for future composition validation
+		// against the world's available tools. The chief-mode detection
+		// already ran further up so the bind-mounts are committed.
+		manifest, err := agent.LoadManifestPath(agent.AgentDir(name))
+		if err != nil {
+			return nil, fmt.Errorf("load agent manifest for %s: %w", name, err)
+		}
+		rollout, err := resolveAgentRollout(name, id, manifest)
+		if err != nil {
+			return nil, err
+		}
+		agentRollouts[name] = rollout
+	}
+
+	// Resolve compile. SPWN_BASE_IMAGE and opts.Image both mean "use this
+	// exact image, don't rebuild" - they're how tests inject a mock
+	// runtime. Only when neither is set do we auto-build from the base
+	// Dockerfile + tool catalog.
+	image := platform.WorldImage
+	explicitImage := false
+	if envImage := os.Getenv("SPWN_BASE_IMAGE"); envImage != "" {
+		image = envImage
+		explicitImage = true
+	}
+	if opts.Image != "" {
+		image = opts.Image
+		explicitImage = true
+	}
+
+	// Registry + resolved dependency list are computed unconditionally.
+	// Even when the image is prebuilt (tests injecting SPWN_BASE_IMAGE)
+	// we still need the resolved tool list for tool-probe verification
+	// and for rendering the Faculties block in every agent's CLAUDE.md.
+	reg := resolver.NewRegistry()
+	if err := dependency.RegisterBuiltins(reg); err != nil {
+		return nil, fmt.Errorf("register tools: %w", err)
+	}
+	if err := runtimes.RegisterDefaults(reg); err != nil {
+		return nil, fmt.Errorf("register runtimes: %w", err)
+	}
+
+	// Always include runtime essentials, then add user-specified tools
+	// and dependencies on top. The registry deduplicates and resolves
+	// dependencies; dependencies share the tool resolution pipeline.
+	//
+	// spwn:cli is deliberately excluded here - it installs the
+	// spwn binary itself and is only meaningful inside the
+	// architect container, not inside the workers' world container.
+	//
+	// The runtime tool is chosen from the declared backend:
+	//   claude-code → spwn:claude-code (self-contained binary install)
+	//   codex       → spwn:codex (npm install -g @openai/codex; pulls
+	//                 spwn:node transitively)
+	// Hardcoding spwn:claude-code here silently installed the wrong
+	// runtime for codex agents, making their containers non-functional.
+	runtimeTool := runtimeBackendTool(opts.runtimeName())
+	required := []string{"spwn:unix", runtimeTool}
+	toolList := append(required, opts.Manifest.Deps...)
+
+	// Deduplicate
+	{
+		seen := make(map[string]bool)
+		deduped := make([]string, 0, len(toolList))
+		for _, t := range toolList {
+			if !seen[t] {
+				seen[t] = true
+				deduped = append(deduped, t)
+			}
+		}
+		toolList = deduped
+	}
+
+	// Hydrate local (tool/<name>) refs into synthetic tool.Tool
+	// instances before resolving. Without this, a ref like
+	// `tool:my-local-tool` would blow up reg.Resolve with "unknown tool".
+	// Project root defaults to platform.ProjectRoot() — set by the CLI
+	// PersistentPreRunE when a spwn.yaml is discovered.
+	if projectRoot := platform.ProjectRoot(); projectRoot != "" {
+		hydrated, hErr := dependency.HydrateLocals(reg, projectRoot, toolList)
+		if hErr != nil {
+			return nil, fmt.Errorf("load local tools: %w", hErr)
+		}
+		toolList = hydrated
+	}
+
+	resolvedTools, resolveErr := reg.Resolve(toolList)
+	if resolveErr != nil {
+		return nil, fmt.Errorf("resolve tools: %w", resolveErr)
+	}
+
+	// Surface the resolved tool list so the CLI stepper can show
+	// the user what's about to install before the (potentially
+	// minutes-long) image build begins.
+	resolvedNames := make([]string, 0, len(resolvedTools))
+	for _, t := range resolvedTools {
+		resolvedNames = append(resolvedNames, t.Name())
+	}
+	opts.progress("tools_resolved", strings.Join(resolvedNames, ", "))
+
+	if !explicitImage {
+		opts.progress("image_resolving", image)
+
+		builder := ib.New(reg, a.backend)
+
+		// Wrap the log writer so the first docker build line
+		// flips the spinner label from "Resolving compile..." to
+		// "Building image". Emits image_building exactly once,
+		// the first time we see actual build output - which
+		// means cache-hit spawns never raise the build label.
+		// Simpler than pre-checking the cache in Go.
+		buildLogWriter := &firstWriteNotifier{
+			inner: opts.logWriter(),
+			once: func() {
+				opts.progress("image_building", image)
+			},
+		}
+
+		buildResult, err := builder.Build(ctx, ib.BuildRequest{
+			BaseDockerfile: ibbase.WorldDockerfile,
+			Tools:          toolList,
+			Policies:       buildPolicyMap(opts.Manifest.DepPolicies),
+
+			Tag:          image,
+			ForceRebuild: opts.ForceRebuild,
+			SkipVerify:   true, // probeTools handles verification below
+			LogWriter:    buildLogWriter,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("build world image: %w", err)
+		}
+		if buildResult.Cached {
+			opts.progress("image_cached", image)
+		} else {
+			opts.progress("image_built", image)
+		}
+	} else {
+		exists, err := a.backend.ImageExists(ctx, image)
+		if err != nil {
+			return nil, fmt.Errorf("check image: %w", err)
+		}
+		if !exists {
+			return nil, fmt.Errorf("image %s not found.\nBuild it first or use the default base image", image)
+		}
+		opts.progress("image_ready", image)
+	}
+
+	// Sync credentials to bind-mountable directory (live - containers see updates)
+	if err := auth.SyncCredentials(); err != nil {
+		warnings = append(warnings, fmt.Sprintf("credential sync: %v", err))
+	}
+	binds = append(binds, platform.CredentialsDir()+":/credentials:ro")
+
+	// Bring up the gate (host-side credential broker) if not already
+	// running. Idempotent and cheap when already up — a single docker
+	// inspect. The gate is what world containers will call for
+	// credentialed MCP requests once their wrappers route through it.
+	if err := gate.EnsureRunning(ctx, opts.logWriter()); err != nil {
+		warnings = append(warnings, fmt.Sprintf("gate ensure-running: %v", err))
+	}
+
+	// MCP OAuth tokens are no longer bind-mounted into worlds — the
+	// gate (host-side daemon, see packages/gate) holds them and
+	// proxies authenticated MCP requests on the world's behalf via
+	// `mcp2cli --mcp http://host.docker.internal:9000/mcp/<element>`.
+	// World containers therefore have zero MCP credentials in their
+	// filesystem; they get a thin CLI wrapper that talks to the gate.
+
+	// gh CLI auth (~/.spwn/credentials/gh, written by `spwn auth
+	// login github`). Layered rw over the ro /credentials root.
+	// GH_CONFIG_DIR points at it on every container so both `gh ...`
+	// cobra commands AND `gh-mcp` (which reads `gh auth token`) see
+	// the same token without an env var. (gh isn't gate-routed yet.)
+	if ghCache := authgh.CacheDir(); ghCache != "" {
+		if err := os.MkdirAll(ghCache, 0o700); err == nil {
+			binds = append(binds, ghCache+":/credentials/gh")
+		}
+	}
+
+	// Pre-flight credential check (defense-in-depth at the architect
+	// level). The CLI's `spwn world up` already does a live-API
+	// validation upstream — but other entry points (snap restore in
+	// apps/cli/snap, the apps/api server, future SDK callers) reach
+	// Spawn directly. Without this hard-fail those paths would burn
+	// the 30–60s cold-spawn cost only to land on a runtime 401 with
+	// no breadcrumb back to "you forgot to log in".
+	//
+	// We do NOT call the live API here (that's the CLI's job; it
+	// caches per-session). We only block the "zero credentials
+	// configured for any provider" case — the cheap, deterministic
+	// check that catches the class-1 bug.
+	creds := auth.ResolveAll()
+	credSource := "none"
+	for _, cred := range creds {
+		if cred.Type != auth.CredTypeNone {
+			credSource = string(cred.Type)
+			break
+		}
+	}
+	if credSource == "none" {
+		// Escape hatch for tests / CI / offline runs: when
+		// SPWN_SKIP_AUTH_VALIDATION is set the suite is exercising a
+		// mock runtime image (spwn-test:latest with mock-claude /
+		// mock-codex), which doesn't need real provider credentials
+		// to spawn. Same env var the validate-cache layer honours;
+		// keeping it in lockstep here so a CI run without secrets
+		// configured still drives the spawn pipeline end-to-end.
+		if os.Getenv("SPWN_SKIP_AUTH_VALIDATION") != "" {
+			credSource = "skipped"
+		} else if providerName := runtimeProvider(opts.runtimeName()); providerName != "" {
+			p := auth.Provider(providerName)
+			return nil, fmt.Errorf("no credentials configured for %s.\n%s", p, auth.NotConfiguredHint(p))
+		}
+	}
+	opts.progress("credentials_resolved", credSource)
+
+	// Non-credential env vars
+	var env []string
+	if opts.IsArchitect {
+		env = append(env, "SPWN_ARCHITECT_MODE=1")
+		env = append(env, "SPWN_HOME=/home/spwn/.spwn")
+	}
+
+	// MCP wrappers route through the gate, so mcp2cli is used purely
+	// in HTTP-proxy mode (--mcp http://host.docker.internal:9000/mcp/...)
+	// from inside worlds. No local cache, no MCP2CLI_CACHE_DIR.
+	// Same idea for gh: hosts.yml + config.yml live at the rw
+	// /credentials/gh bind-mount. Setting GH_CONFIG_DIR works for
+	// `gh` cobra commands AND `gh auth token`, which is what the
+	// gh-mcp wrapper consults to drive the GitHub MCP server.
+	env = append(env, "GH_CONFIG_DIR=/credentials/gh")
+
+	// Workspace discovery env vars
+	if len(resolvedWorkspaces) > 0 {
+		total := len(resolvedWorkspaces)
+		pairs := make([]string, 0, total)
+		for _, ws := range resolvedWorkspaces {
+			pairs = append(pairs, fmt.Sprintf("%s:%s", ws.Name, workspaceContainerPath(ws.Name, total)))
+		}
+		env = append(env, "SPWN_WORKSPACES="+strings.Join(pairs, ","))
+		env = append(env, "SPWN_WORKSPACE_DEFAULT="+workspaceContainerPath(resolvedWorkspaces[0].Name, total))
+	}
+
+	// Resolve the requested knowledge bind BEFORE constructing
+	// worldRecord so the labels-as-truth store captures whether a
+	// knowledge dir was actually mounted. The actual `binds` append
+	// happens further below alongside the other world state mounts,
+	// but the decision is made here so the worldRecord reflects
+	// reality.
+	knowledgeMounted := false
+	if opts.Knowledge != "" {
+		if info, err := os.Stat(opts.Knowledge); err == nil && info.IsDir() {
+			knowledgeMounted = true
+		} else {
+			warnings = append(warnings, fmt.Sprintf("knowledge path %s not found; skipping bind", opts.Knowledge))
+		}
+	}
+
+	// Build the World record up-front so we can imprint it onto the
+	// container as labels at create time. The container becomes the
+	// canonical store - see packages/world/internal/labels.
+	worldRecord := models.World{
+		ID:               id,
+		Name:             opts.Name,
+		Config:           opts.ConfigName,
+		Agent:            opts.AgentName,
+		Backend:          platform.DefaultBackend,
+		Runtime:          opts.runtimeName(),
+		Workspaces:       resolvedWorkspaces,
+		CreatedAt:        time.Now(),
+		Manifest:         opts.Manifest,
+		KnowledgeMounted: knowledgeMounted,
+	}
+	if len(opts.Agents) > 0 {
+		worldRecord.Agent = opts.Agents[0].Name
+		worldRecord.AgentID = platform.GenerateAgentID(opts.Agents[0].Name)
+		for _, spec := range opts.Agents {
+			role := agent.DefaultRole(spec.Role)
+			rollout := agentRollouts[spec.Name]
+			worldRecord.Agents = append(worldRecord.Agents, models.AgentRecord{
+				Name:          spec.Name,
+				AgentID:       platform.GenerateAgentID(spec.Name),
+				Role:          role,
+				Version:       rollout.Version,
+				RolloutCohort: rollout.Cohort,
+				CanaryPercent: rollout.CanaryPercent,
+				Status:        models.StatusIdle,
+			})
+		}
+	} else if opts.AgentName != "" {
+		rollout := agentRollouts[opts.AgentName]
+		worldRecord.AgentID = platform.GenerateAgentID(opts.AgentName)
+		worldRecord.Agents = []models.AgentRecord{{
+			Name:          opts.AgentName,
+			AgentID:       worldRecord.AgentID,
+			Role:          "worker",
+			Version:       rollout.Version,
+			RolloutCohort: rollout.Cohort,
+			CanaryPercent: rollout.CanaryPercent,
+			Status:        models.StatusIdle,
+		}}
+	}
+
+	// Per-world state directory on the host. Used as a stable target
+	// for optional sub-path binds (`/world/knowledge`, and historically
+	// `/world/shared` + `/world/skills`). We no longer bind-mount it at
+	// `/world/` wholesale: that shadowed the image-baked `/world/skills/`
+	// (CollectSkills bakes tool-shipped SKILL.md files there at build
+	// time), which meant Claude Code's native skill discovery found an
+	// empty directory and never surfaced any spwn-provided skill.
+	//
+	// Instead: leave `/world/` coming from the image (contains
+	// `/world/skills/*` + anything a runtime's build step wrote) and
+	// only bind the subpaths that need host-side persistence.
+	worldStateDir := worldStateDirFor(id)
+	if err := os.MkdirAll(worldStateDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create world-state dir %s: %w", worldStateDir, err)
+	}
+
+	// Bind the explicit knowledge path on top of /world/knowledge so
+	// edits inside the container persist straight back into git. The
+	// CLI resolves any project-relative path in spwn.yaml to an
+	// absolute host path before calling Spawn. When the field is
+	// empty (or stat failed earlier), there is no bind mount AND the
+	// compile step below is told no knowledge base exists, so the
+	// agent's system prompt never mentions /world/knowledge/.
+	if knowledgeMounted {
+		binds = append(binds, opts.Knowledge+":/world/knowledge")
+	}
+
+	// Per-agent per-world deployment dirs. Each agent gets a personal
+	// inbox/outbox/notes scoped to this world id, all rooted in the
+	// agent's persistent home so messages survive container destroy.
+	// The rendered files (role.md, CLAUDE.md) come from the compile
+	// Tree below; here we only create the empty inbox/outbox/notes
+	// directories because they're runtime state, not generated
+	// content.
+	rosterAgents := worldRecord.Agents
+	if len(rosterAgents) == 0 && worldRecord.Agent != "" {
+		rosterAgents = []models.AgentRecord{{
+			Name:    worldRecord.Agent,
+			AgentID: worldRecord.AgentID,
+			Role:    "worker",
+			Status:  models.StatusIdle,
+		}}
+	}
+	for _, rec := range rosterAgents {
+		if err := initAgentDeploymentDirs(rec, id); err != nil {
+			warnings = append(warnings, fmt.Sprintf("init deployment for %s: %v", rec.Name, err))
+		}
+	}
+
+	// Create container. CPU/memory limits intentionally omitted — the
+	// Docker host defaults govern. Per-world hard limits may return as
+	// a dedicated knob later but are not declared in spwn.yaml.
+	// PidsLimit = 256 — sufficient for any worker-style agent. Chiefs
+	// no longer need a higher limit because they don't fork claude
+	// sessions inside their own container; they call the gate over
+	// MCP and the gate forks `spwn agent talk` host-side.
+	pidsLimit := int64(256)
+	containerCfg := backend.ContainerConfig{
+		Image:       image,
+		Name:        id,
+		PidsLimit:   pidsLimit,
+		NetworkMode: "bridge",
+		Binds:       binds,
+		Env:         env,
+		Labels:      labels.WorldLabels(worldRecord),
+		GroupAdd:    groupAdd,
+	}
+
+	containerID, err := a.backend.Create(ctx, containerCfg)
+	if err != nil {
+		return nil, fmt.Errorf("create container: %w", err)
+	}
+
+	if err := a.backend.Start(ctx, containerID); err != nil {
+		a.backend.Remove(ctx, containerID)
+		return nil, fmt.Errorf("start container: %w", err)
+	}
+	opts.progress("container_created", id)
+
+	// Copy every deployed agent's home directory from the host into
+	// the container at /agents/<name>/. This is the replacement for
+	// the former bind mount — it's a one-way snapshot, writes inside
+	// the container never flow back to the host except on graceful
+	// shutdown (see Destroy → syncAgentsOutOf).
+	agentHomes := agentHomesForSpawn(opts)
+	if err := deploy.SyncIn(ctx, a.backend, containerID, agentHomes); err != nil {
+		a.backend.Stop(ctx, containerID)
+		a.backend.Remove(ctx, containerID)
+		return nil, fmt.Errorf("sync agent homes into container: %w", err)
+	}
+
+	// Write the runtime provider's default config files directly
+	// into the running container at each agent's HOME. These
+	// pre-dismiss first-run UI — Claude Code's onboarding banner,
+	// trust dialogs, dangerous-mode prompt — so `spwn agent <name>`
+	// drops straight into a clean session. docker cp'd per file,
+	// overwrites any placeholder that came in via the host copy.
+	if len(agentHomes) > 0 {
+		if err := writeRuntimeDefaultConfig(ctx, a.backend, containerID, opts.runtimeName(), agentHomes); err != nil {
+			warnings = append(warnings, fmt.Sprintf("runtime default config: %v", err))
+		}
+	}
+
+	// The chown used to sit here — but the transpile tree gets
+	// docker-cp'd further down, which re-creates root-owned files
+	// on top of our work. ChownAgentHomes now runs AFTER every cp
+	// step (see the second call below) so spwn can actually write
+	// to its own home (e.g. codex's PrelaunchShell appending the
+	// trust table to $HOME/.codex/config.toml).
+
+	// Probe tools by running each resolved tool's Verify() commands
+	// inside the container. This is the canonical "is my image
+	// actually healthy" check - the probe pulls its expectations
+	// straight from the catalog, so the same install specs that
+	// built the image decide what must be present at runtime.
+	verifiedTools, err := a.probeTools(ctx, containerID, resolvedTools)
+	if err != nil {
+		a.backend.Stop(ctx, containerID)
+		a.backend.Remove(ctx, containerID)
+		return nil, err
+	}
+	opts.progress("tools_probed", fmt.Sprintf("%d verified", len(verifiedTools)))
+
+	// Render every file this world needs through the compiler. Each
+	// runtime emits its own native prompt file (CLAUDE.md for
+	// claude-code, AGENTS.md for codex) with world context inlined.
+	// MaterialiseTree is still prefix-aware in case a future runtime
+	// emits world/* files; today every entry flows via docker-cp into
+	// the agent home.
+	runtimeSkills := collectRuntimeSkills(platform.ProjectRoot(), resolvedTools)
+	hookPool := loadRuntimeHooks(platform.ProjectRoot())
+	commandPool := loadRuntimeCommands(platform.ProjectRoot())
+	compileInput := transpile.Input{
+		Deps:                  opts.Manifest.Deps,
+		VerifiedTools:         facultiesForRuntime(verifiedTools, opts.Manifest.Deps),
+		WorldID:               id,
+		Agents:                rosterCompileAgents(rosterAgents, hookPool, commandPool),
+		WorldKnowledgeMounted: knowledgeMounted,
+		Skills:                runtimeSkills,
+		Hooks:                 hookPool,
+		Commands:              commandPool,
+	}
+	tree, err := transpile.Compile(opts.runtimeName(), compileInput)
+	if err != nil {
+		a.backend.Stop(ctx, containerID)
+		a.backend.Remove(ctx, containerID)
+		return nil, fmt.Errorf("compile world: %w", err)
+	}
+	if err := deploy.MaterialiseTree(ctx, a.backend, containerID, tree, worldStateDir); err != nil {
+		a.backend.Stop(ctx, containerID)
+		a.backend.Remove(ctx, containerID)
+		return nil, fmt.Errorf("materialise world tree: %w", err)
+	}
+	opts.progress("world_state_written", "per-agent "+runtimePromptFile(opts.runtimeName()))
+
+	// Chown the whole agent home tree AFTER every docker-cp step so
+	// every file the agent might need to touch at runtime (auth
+	// writes, codex config appends, journal scribbles) is spwn-owned
+	// and writable. Tar extraction from docker cp always lands files
+	// as root:root regardless of source; this pass repairs that.
+	if len(agentHomes) > 0 {
+		if err := deploy.ChownAgentHomes(ctx, a.backend, containerID, agentHomes); err != nil {
+			a.backend.Stop(ctx, containerID)
+			a.backend.Remove(ctx, containerID)
+			return nil, fmt.Errorf("chown agent homes: %w", err)
+		}
+	}
+
+	// Finalize the world record. The labels we already wrote to the
+	// container are the canonical store - this struct is just what we
+	// hand back to the caller. ContainerID and Status come from the
+	// runtime side, not from labels. Future state.List() calls will
+	// reconstruct identical Worlds straight from container labels.
+	u := worldRecord
+	u.ContainerID = containerID
+	u.Status = models.StatusIdle
+
+	// Emit activity events
+	agentNames := []string{}
+	for _, ag := range u.Agents {
+		agentNames = append(agentNames, ag.Name)
+	}
+	if len(agentNames) == 0 && u.Agent != "" {
+		agentNames = append(agentNames, u.Agent)
+	}
+	activity.Log(activity.Event{
+		Type:    activity.TypeWorldSpawned,
+		Actor:   "architect",
+		Verb:    "spawned",
+		Target:  u.ID,
+		Phrase:  activity.PhraseWorldSpawned(u.ID, agentNames),
+		WorldID: u.ID,
+	})
+	for _, name := range agentNames {
+		activity.Log(activity.Event{
+			Type:    activity.TypeAgentJoined,
+			Actor:   "architect",
+			Verb:    "joined",
+			Target:  u.ID,
+			Phrase:  activity.PhraseAgentJoined(name, u.ID),
+			WorldID: u.ID,
+			AgentID: name,
+		})
+	}
+
+	return &SpawnResult{World: &u, Warnings: warnings}, nil
+}

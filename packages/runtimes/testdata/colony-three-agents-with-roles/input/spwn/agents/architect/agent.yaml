@@ -1,0 +1,6 @@
+name: architect
+role: chief
+runtime:
+  backend: "spwn:claude-code"
+dependencies:
+  - "spwn:unix"

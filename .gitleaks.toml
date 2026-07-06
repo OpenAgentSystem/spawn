@@ -1,0 +1,11 @@
+title = "OpenAgentSystem public gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow synthetic secret-shaped fixtures used by scanner tests"
+paths = [
+  '''__tests__/[^/]*-guard\.test\.(js|ts|jsx|tsx)$''',
+  '''(^|/)tests?/.*''',
+]

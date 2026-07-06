@@ -1,0 +1,14 @@
+name: "spwn:mempalace"
+version: "0.1.0"
+description: "Local memory palace CLI — persistent notes across sessions"
+
+dependencies:
+  - "spwn:python"
+
+install:
+  commands:
+    - pip install --no-cache-dir --break-system-packages mempalace
+
+verify:
+  - command -v mempalace
+  - mempalace --version

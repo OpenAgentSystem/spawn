@@ -1,0 +1,7 @@
+version: 1
+name: long-names
+worlds:
+  home:
+    agents: [a-very-long-agent-name-that-tests-slug-boundaries-abc]
+    workspaces: [.]
+    knowledge: ./knowledge

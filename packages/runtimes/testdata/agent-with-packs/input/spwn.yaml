@@ -1,0 +1,7 @@
+version: 1
+name: pluggy
+worlds:
+  home:
+    agents: [neo]
+    workspaces: [.]
+    knowledge: ./knowledge

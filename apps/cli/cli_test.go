@@ -1,0 +1,169 @@
+package cli
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
+
+// executeCommand runs rootCmd with the given args and captures stdout/stderr.
+// Cobra commands maintain state between calls, so we reset args each time.
+// --help short-circuits before PersistentPreRunE, avoiding filesystem side effects.
+func executeCommand(args ...string) (string, string, error) {
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+
+	rootCmd.SetOut(stdout)
+	rootCmd.SetErr(stderr)
+	rootCmd.SetArgs(args)
+
+	err := rootCmd.Execute()
+
+	return stdout.String(), stderr.String(), err
+}
+
+// assertContains checks that output contains the given substring.
+func assertContains(t *testing.T, output, substring, context string) {
+	t.Helper()
+	if !strings.Contains(output, substring) {
+		t.Errorf("%s: output missing %q\n--- output ---\n%s", context, substring, output)
+	}
+}
+
+// --- Root help ---
+
+func TestCLI_Help(t *testing.T) {
+	out, _, err := executeCommand("--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the stable top-level subcommands are listed in the grouped
+	// help. `web` was dropped from this list when the command was hidden
+	// pending a richer dashboard; it remains invokable by name (covered
+	// separately in TestCLI_WebHelp below).
+	for _, sub := range []string{"world", "agent", "skill", "install", "architect", "init"} {
+		assertContains(t, out, sub, "root help")
+	}
+}
+
+func TestCLI_HelpContainsDescription(t *testing.T) {
+	out, _, err := executeCommand("--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertContains(t, out, "spwn", "root help description")
+	assertContains(t, out, "Quick Start", "root help quick start section")
+	assertContains(t, out, "Entities:", "root help entities section")
+	assertContains(t, out, "Building blocks:", "root help building blocks section")
+	assertContains(t, out, "world", "root help world command")
+	assertContains(t, out, "agent", "root help agent command")
+	assertContains(t, out, "System:", "root help system section")
+}
+
+// --- World help ---
+
+func TestCLI_WorldHelp(t *testing.T) {
+	out, _, err := executeCommand("world", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, sub := range []string{"up", "ls", "inspect", "logs", "enter", "down"} {
+		assertContains(t, out, sub, "world help")
+	}
+}
+
+// --- Agent help ---
+
+func TestCLI_AgentHelp(t *testing.T) {
+	out, _, err := executeCommand("agent", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, sub := range []string{"create", "ls", "rm", "talk", "inspect", "dream", "sleep", "fork"} {
+		assertContains(t, out, sub, "agent help")
+	}
+}
+
+func TestCLI_AgentTalkHelp(t *testing.T) {
+	out, _, err := executeCommand("agent", "talk", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertContains(t, out, "talk", "agent talk help")
+	assertContains(t, out, "agent-name", "agent talk usage")
+	assertContains(t, out, "interactive", "agent talk description")
+}
+
+func TestCLI_AgentDeleteHelp(t *testing.T) {
+	out, _, err := executeCommand("agent", "delete", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertContains(t, out, "delete", "agent rm help")
+	assertContains(t, out, "agent-name", "agent rm usage")
+}
+
+// --- Architect help ---
+
+func TestCLI_ArchitectHelp(t *testing.T) {
+	out, _, err := executeCommand("architect", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, sub := range []string{"start", "stop", "status"} {
+		assertContains(t, out, sub, "architect help")
+	}
+}
+
+// --- Install help ---
+
+func TestCLI_InstallHelp(t *testing.T) {
+	out, _, err := executeCommand("install", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertContains(t, out, "spwn install", "install help")
+}
+
+// --- Web help ---
+
+func TestCLI_WebHelp(t *testing.T) {
+	out, _, err := executeCommand("web", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertContains(t, out, "web", "web help usage")
+	assertContains(t, out, "--port", "web help port flag")
+	assertContains(t, out, "--no-open", "web help no-open flag")
+}
+
+// --- Init help ---
+
+func TestCLI_InitHelp(t *testing.T) {
+	out, _, err := executeCommand("init", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertContains(t, out, "init", "init help")
+	assertContains(t, out, ".spwn", "init help mentions config dir")
+}
+
+// --- Unknown command ---
+
+func TestCLI_UnknownCommand(t *testing.T) {
+	_, _, err := executeCommand("nonexistent")
+	if err == nil {
+		t.Error("expected error for unknown command")
+	}
+}
+

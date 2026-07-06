@@ -1,0 +1,53 @@
+package world
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"spwn.sh/packages/architect"
+
+	"github.com/spf13/cobra"
+	"spwn.sh/apps/cli/ui"
+)
+
+func init() {
+	Cmd.AddCommand(renameCmd)
+}
+
+var renameCmd = &cobra.Command{
+	Use:   "rename <world-id> [name]",
+	Short: "Rename a world (omit name to clear)",
+	Args:  cobra.RangeArgs(1, 2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := context.Background()
+		s := ui.New()
+
+		worldID := args[0]
+		name := ""
+		if len(args) > 1 {
+			name = strings.TrimSpace(args[1])
+		}
+
+		arc, err := architect.NewFromEnv()
+		if err != nil {
+			return s.FailHint("Docker", err, "Start Docker Desktop or OrbStack, then try again")
+		}
+
+		s.Blank()
+		s.Start("Renaming world...")
+
+		if err := arc.Rename(ctx, worldID, name); err != nil {
+			return s.FailHint("Rename failed", err,
+				fmt.Sprintf("Check that world %q exists with \"spwn world list\"", worldID))
+		}
+
+		if name == "" {
+			s.Done("Name cleared", worldID)
+		} else {
+			s.Done("Renamed", fmt.Sprintf("%s → %s", worldID, name))
+		}
+		s.Blank()
+		return nil
+	},
+}

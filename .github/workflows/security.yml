@@ -1,0 +1,42 @@
+name: Security
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  data-sanitization:
+    name: Data Sanitization Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for private organization markers
+        run: |
+          set -euo pipefail
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude-dir=node_modules \
+            --exclude-dir=dist \
+            --exclude='*.lock' \
+            'GridLtd-ProductDev|Gridltd-DevOps|mastluo|james37950|chandlerlou|lindenguo|ashleyzeng|paul@gridltd\.com|BEGIN [A-Z ]*PRIVATE KEY' .; then
+            echo "::error::Private organization marker or private key pattern found."
+            exit 1
+          fi

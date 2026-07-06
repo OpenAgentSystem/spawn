@@ -1,0 +1,6 @@
+# Catalog entry for spwn:docker-cli.
+# Mirrors a real spwn project layout: tool manifests under
+# tools/<name>/tool.yaml, skills lifted to skills/ at the
+# catalog-entry root so they're exposed alongside the tools bundle.
+version: 1
+name: docker-cli

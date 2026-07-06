@@ -1,0 +1,9 @@
+name: morpheus
+description: Seed fixture used by the colony e2e to add a second agent alongside neo.
+
+runtime:
+    backend: 'spwn:claude-code'
+
+dependencies:
+    - 'spwn:unix'
+    - 'spwn:git'

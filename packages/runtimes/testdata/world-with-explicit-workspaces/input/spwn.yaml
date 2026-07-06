@@ -1,0 +1,9 @@
+version: 1
+name: ws-explicit
+worlds:
+  home:
+    agents: [neo]
+    workspaces:
+      - ./src
+      - ./tests
+    knowledge: ./knowledge
